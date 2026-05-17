@@ -10,19 +10,12 @@
   "icon": "assets/sisr/icon.png",
   "environment": "server",
   "entrypoints": {
-    "fabric-datagen": [
-      "org.adhiadhi.sisr.client.SisrDataGenerator"
-    ],
     "main": [
       "org.adhiadhi.sisr.Sisr"
     ]
   },
   "mixins": [
-    "sisr.mixins.json",
-    {
-      "config": "sisr.client.mixins.json",
-      "environment": "client"
-    }
+    "sisr.mixins.json"
   ],
   "depends": {
     "fabricloader": ">=${loader_version}",

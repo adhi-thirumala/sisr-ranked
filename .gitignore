@@ -1,7 +1,8 @@
 /sisr-mod/.gradle
-/sisr-mod/build/reports/problems
+/sisr-mod/build
 /sisr-mod/gradlew
 /sisr-mod/gradlew.bat
+/sisr-mod/run
 /sisr-proxy/.gradle
 /sisr-proxy/build
 /sisr-proxy/gradlew

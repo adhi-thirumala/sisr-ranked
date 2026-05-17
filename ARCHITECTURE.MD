@@ -58,8 +58,8 @@ flowchart TB
   Agent -- "Podman API" --> Match2
   QueueDO -- "creates" --> MatchDO
   MatchDO --> D1
-  Velocity -- "GET /api/route/:uuid" --> Workers
-  Match1 -- "POST /api/match/:id/claim" --> Workers
+  Velocity -- "GET /api/route/:uuid + wss events" --> Workers
+  Match1 -- "POST /api/match/:id/ready, /claim" --> Workers
   Velocity --> Match1
   Velocity --> Match2
 ```
@@ -132,6 +132,8 @@ Routes the Worker handles:
 - `GET  /api/me` → current user (UUID, name, ELO, stats)
 - `GET  /api/queue/join` (WebSocket upgrade) → routes to the right Queue DO
 - `GET  /api/match/:matchId/ws` (WebSocket upgrade) → routes to the Match DO
+- `GET  /api/velocity/events` (service WebSocket upgrade) → routes to the Match DO event stream; used by Velocity for match readiness pushes
+- `POST /api/match/:matchId/ready` → forwarded to Match DO; called by Fabric mod after boot + pregeneration completes
 - `POST /api/match/:matchId/claim` → forwarded to Match DO; called by Fabric mod
 - `GET  /api/route/:uuid` → returns where Velocity should send this player
 - `GET  /api/leaderboard` → KV-cached top 100
@@ -162,8 +164,10 @@ Responsibilities:
 1. Hold the match metadata (`players: string[]`, target item, started_at, container address). Stored as an array so adding FFA later is a player-count change, not a schema change.
 2. Write routing entries (`route:<uuid>` → `matchId`) into KV with 30-minute TTL so Velocity can resolve the player on join.
 3. Hold the match WebSocket connections — one per player for the in-match HUD, plus optional spectators.
-4. Arbitrate `/claim`. **The single most important guarantee in the system.** When the Fabric mod detects a player picked up the target item, it POSTs to `/match/:id/claim`; the DO uses `blockConcurrencyWhile` to atomically set the winner. First call wins; subsequent calls see the existing winner and respond truthfully.
-5. On winner set: persist the match to D1, recompute Elo for all participants in a single batched transaction, bust the leaderboard cache, broadcast the winner over WebSockets, request container teardown from the Agent.
+4. Hold privileged Velocity event subscribers. Velocity keeps a service WebSocket open so Match DOs can push lifecycle events without polling or exposing a public endpoint on the VPS.
+5. Mark the container ready. After the Fabric mod completes boot + pregeneration, it calls `POST /api/match/:matchId/ready`; the Match DO stores `ready_at`, broadcasts `{type:"match_ready", matchId, players, serverAddress}` to Velocity, and broadcasts readiness to match WebSockets.
+6. Arbitrate `/claim`. **The single most important guarantee in the system.** When the Fabric mod detects a player picked up the target item, it POSTs to `/match/:id/claim`; the DO uses `blockConcurrencyWhile` to atomically set the winner. First call wins; subsequent calls see the existing winner and respond truthfully.
+7. On winner set: persist the match to D1, recompute Elo for all participants in a single batched transaction, bust the leaderboard cache, broadcast the winner over WebSockets, request container teardown from the Agent.
 
 The DO is the only place in the system where multi-writer arbitration matters. Everywhere else, last-write-wins is fine or there's only one writer.
 
@@ -173,10 +177,10 @@ When the Queue DO forms a match, it calls the Worker's internal `allocate(matchI
 
 1. POSTs to the Agent's `/match/start` over Cloudflare Tunnel with the match config (UUIDs, target item, world seed, JVM flags, view distance — see *Resource budget*).
 2. Receives `{serverName, address}` from the Agent within a few hundred ms (the Agent calls Podman's container-create + container-start endpoints, which return quickly even before the JVM is fully booted).
-3. Writes `route:<uuid>` for each player into KV so Velocity can look them up.
+3. Writes `route:<uuid>` for each player into KV so Velocity can look them up. Routes are assigned immediately, but the Match DO is the source of truth for whether the backend is ready.
 4. Returns the address to the Queue DO so it can include it in the `match_found` message.
 
-The container's mod boots in ~10-15s. The wheel animation on the frontend covers most of this; if a player clicks "connect" before the server is ready, they get a single retry with backoff (Velocity returns a friendly "match is starting, try again in 5s" message).
+The container's mod boots in ~10-15s. The wheel animation on the frontend covers most of this. Players who are already connected to `lobby` are moved automatically only after the Match DO receives the Fabric ready callback and pushes `match_ready` to Velocity. Players who connect after readiness route directly to the match server.
 
 ### D1
 
@@ -254,10 +258,11 @@ Containers run on a dedicated Podman network (`rir-net`). Velocity is on the sam
 
 Single Velocity instance on the VPS (rootless Podman container declared in the Compose file, on the same Podman network as match containers). Configured for **modern forwarding** (online-mode in Velocity, offline-mode in backend Fabric servers — Velocity passes the verified UUID through). One plugin: `RIRRouter`.
 
-`RIRRouter` does two things:
+`RIRRouter` does three things:
 
-1. On `PlayerChooseInitialServerEvent`: fetch `GET /api/route/<uuid>` from the Worker. If a match is assigned, register the target server on-the-fly via `proxy.registerServer(...)` if not already registered, then set as initial server. Default to `lobby` if no match.
-2. On `ServerPostConnectEvent` (player joined a match server) and on match-end notification: unregister the server when the last player leaves, keeping the registration table clean.
+1. On `PlayerChooseInitialServerEvent`: fetch `GET /api/route/<uuid>` from the Worker. If a ready match is assigned, register the target server on-the-fly via `proxy.registerServer(...)` if not already registered, then set as initial server. Default to `lobby` if no match or if the assigned match is not ready yet.
+2. Keep a privileged WebSocket open to the Worker/Match DO event stream. On `{type:"match_ready", matchId, players, serverAddress}`, register the match server and connect any listed players who are currently in `lobby` to that backend. Offline players are left alone; their KV route handles their next join. Players already on the match server are no-ops.
+3. On `ServerPostConnectEvent` (player joined a match server), player disconnect, and match-end notification: unregister the server when the last player leaves, keeping the registration table clean.
 
 Backend match servers are addressed by their Podman network name (`match-<short-id>:25565`). The lobby server is statically registered.
 
@@ -270,10 +275,11 @@ Lifecycle:
 1. Agent creates the container via Podman with env vars: `MATCH_ID`, `TARGET_ITEM`, `WORLD_SEED`, `ALLOWED_UUIDS`, `VIEW_DISTANCE`, `JVM_FLAGS`, `API_BASE`, `API_TOKEN`. Container is created with auto-remove on exit.
 2. Entrypoint writes `server.properties` from env, then starts the JVM.
 3. Mod's `onServerStarting` pregenerates a 12-chunk-radius region around spawn (see *Pregeneration*).
-4. On `ServerPlayConnectionEvents.JOIN`: verify the player's UUID is in `ALLOWED_UUIDS` (kick if not), fetch match state from the Worker (`GET /api/match/state/<uuid>`), announce target item in chat.
-5. Each server tick, scan online players' inventories for the target item. If found, POST `/api/match/<matchId>/claim` with the UUID. The Match DO answers with the canonical winner — the mod believes the DO, not its own scan.
-6. On winner declared (from claim response or WebSocket from Match DO): show a 10-second result screen, then `/send everyone lobby`.
-7. After all players leave or 15-minute timeout, exit cleanly. Agent's Podman events watcher notifies the Worker; container is auto-removed.
+4. After pregeneration completes and the server is joinable, POST `/api/match/<matchId>/ready` to the Worker. The Match DO then pushes readiness to Velocity so lobby players can be moved into the match.
+5. On `ServerPlayConnectionEvents.JOIN`: verify the player's UUID is in `ALLOWED_UUIDS` (kick if not), fetch match state from the Worker (`GET /api/match/state/<uuid>`), announce target item in chat.
+6. Each server tick, scan online players' inventories for the target item. If found, POST `/api/match/<matchId>/claim` with the UUID. The Match DO answers with the canonical winner — the mod believes the DO, not its own scan.
+7. On winner declared (from claim response or WebSocket from Match DO): show a 10-second result screen, then `/send everyone lobby`.
+8. After all players leave or 15-minute timeout, exit cleanly. Agent's Podman events watcher notifies the Worker; container is auto-removed.
 
 The container is **single-use**. No world reset logic, no slot bookkeeping — a fresh container *is* the fresh world. Match containers run **rootless** (Podman default) — the JVM inside has no path to host root even if the mod is compromised.
 
@@ -369,7 +375,23 @@ Queue DO → sends each waiting socket {type: "match_found", matchId, targetItem
 Queue DO → closes each socket, deletes q:<uuid>
 ```
 
-The frontend then opens a new WebSocket to the Match DO and starts the wheel animation, landing on `targetItem`. The container is finishing its pregeneration in parallel; by the time the wheel completes, the server is join-ready.
+The frontend then opens a new WebSocket to the Match DO and starts the wheel animation, landing on `targetItem`. The container is finishing its pregeneration in parallel; by the time the wheel completes, the server should be close to join-ready. If the player is already connected to the Minecraft lobby, Velocity waits for the Match DO's `match_ready` event before moving them.
+
+### Match readiness → lobby transfer
+
+```
+Fabric mod completes boot + pregeneration
+Fabric mod → Worker POST /api/match/<matchId>/ready
+Worker → Match DO fetch /ready
+Match DO:
+  - stores ready_at
+  - broadcasts {type:"match_ready", matchId, players, serverAddress} to Velocity service WS
+  - broadcasts readiness to player match WebSockets
+Velocity:
+  - registers serverAddress if needed
+  - for each listed UUID currently connected to lobby, calls createConnectionRequest(matchServer).connect()
+  - leaves offline players alone; /api/route/:uuid handles their next join
+```
 
 ### In-match: claim arbitration
 
@@ -514,8 +536,8 @@ The architecture is designed so 1v1 → FFA is additive, not transformative. See
 | D1 `matches` | `match_id` | match record | forever | Match DO |
 | D1 `match_players` | `(match_id, mc_uuid)` | per-player result | forever | Match DO |
 | DO storage (Queue) | `q:<uuid>` | `{elo, joinedAt}` | until matched | Queue DO |
-| DO storage (Match) | `matchId, players, targetItem, winner, startedAt, address` | scalar fields | hibernation | Match DO |
-| KV `ROUTING` | `route:<uuid>` | `{matchId, serverAddress}` | 1800s | Allocator |
+| DO storage (Match) | `matchId, players, targetItem, winner, startedAt, readyAt, address` | scalar fields | hibernation | Match DO |
+| KV `ROUTING` | `route:<uuid>` | `{matchId, serverAddress, ready}` | 1800s | Allocator + Match DO readiness update |
 | KV `ROUTING` | `pending:<uuid>` | match info JSON | 60s | Queue DO |
 | KV `CACHE` | `leaderboard:top100` | JSON array | 30s | API Worker (read), Match DO (bust) |
 
@@ -570,9 +592,10 @@ These are the assumptions the rest of the system relies on. Breaking one is a re
 2. **The Match DO is the only writer for a given match.** Nothing else writes to that `matchId`'s rows in D1 or to its `route:<uuid>` KV entries.
 3. **`blockConcurrencyWhile` is the only correctness mechanism for the winner.** Don't add a second one and don't bypass it.
 4. **The Worker is stateless.** Any state you find yourself wanting to put in module-level variables in the Worker belongs in a DO.
-5. **Velocity is the only public TCP entry point to the MC tier.** Match containers bind only to the private Podman network.
-6. **The Agent is reached only via Cloudflare Tunnel.** No public endpoint.
-7. **One container = one match.** When the container exits, the match is over. No reuse, no reset.
-8. **D1 is the system of record.** Caches (KV, in-DO memory) can be wrong transiently; D1 cannot.
-9. **A 1v1 match has exactly 2 players.** When this changes (FFA-4), the matchmaker, wheel UI, Elo calculation, and container sizing change together. The Match DO, Fabric mod claim/win flow, schema, and orchestration do **not** change. The `players: string[]` shape and the `match_players` table exist precisely to make this true.
-10. **All containers on the VPS run rootless via Podman.** Match containers, Velocity, the Agent, and cloudflared all run as an unprivileged user. There is no `sudo`-required path in the deployment. Compromising any container does not yield host root.
+5. **The Match DO owns match readiness.** Velocity may move players only from a Match DO `match_ready` event or from a route lookup that says the match is ready.
+6. **Velocity is the only public TCP entry point to the MC tier.** Match containers bind only to the private Podman network.
+7. **The Agent is reached only via Cloudflare Tunnel.** No public endpoint.
+8. **One container = one match.** When the container exits, the match is over. No reuse, no reset.
+9. **D1 is the system of record.** Caches (KV, in-DO memory) can be wrong transiently; D1 cannot.
+10. **A 1v1 match has exactly 2 players.** When this changes (FFA-4), the matchmaker, wheel UI, Elo calculation, and container sizing change together. The Match DO, Fabric mod claim/win flow, schema, and orchestration do **not** change. The `players: string[]` shape and the `match_players` table exist precisely to make this true.
+11. **All containers on the VPS run rootless via Podman.** Match containers, Velocity, the Agent, and cloudflared all run as an unprivileged user. There is no `sudo`-required path in the deployment. Compromising any container does not yield host root.
