@@ -1,0 +1,11 @@
+{
+  "id": "sisr-proxy",
+  "name": "sisr-proxy",
+  "version": "${version}",
+  "main": "org.adhiadhi.sisrProxy.SisrProxy",
+  "description": "Serverside proxy for SISR ranked.",
+  "url": "adhithirumala.com",
+  "authors": [
+    "Adhi Thirumala"
+  ]
+}

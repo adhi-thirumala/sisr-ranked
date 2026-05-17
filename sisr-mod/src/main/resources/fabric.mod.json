@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "sisr",
+  "version": "${version}",
+  "name": "sisr",
+  "description": "Serverside mod for SISR ranked.",
+  "authors": [],
+  "contact": {},
+  "license": "AGPL-3.0",
+  "icon": "assets/sisr/icon.png",
+  "environment": "server",
+  "entrypoints": {
+    "fabric-datagen": [
+      "org.adhiadhi.sisr.client.SisrDataGenerator"
+    ],
+    "main": [
+      "org.adhiadhi.sisr.Sisr"
+    ]
+  },
+  "mixins": [
+    "sisr.mixins.json",
+    {
+      "config": "sisr.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "${minecraft_version}"
+  }
+}
