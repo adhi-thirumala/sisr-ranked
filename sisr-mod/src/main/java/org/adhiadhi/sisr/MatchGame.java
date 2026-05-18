@@ -178,37 +178,41 @@ public final class MatchGame {
       return;
     }
 
-    if (config.apiBase().isBlank()) {
+    String apiBase = config.apiBase();
+    String apiToken = config.apiToken();
+    String matchId = config.matchId();
+    if (apiBase.isBlank()) {
       finish(server, uuid);
       return;
     }
 
     try {
       String body = GSON.toJson(new ClaimRequest(uuid.toString()));
-      HttpRequest.Builder request = HttpRequest.newBuilder(claimUri())
+      HttpRequest.Builder request = HttpRequest.newBuilder(claimUri(apiBase, matchId))
           .timeout(Duration.ofSeconds(4))
           .header("content-type", "application/json")
           .POST(HttpRequest.BodyPublishers.ofString(body));
-      if (!config.apiToken().isBlank()) {
-        request.header("authorization", "Bearer " + config.apiToken())
-            .header("x-service-token", config.apiToken());
+      if (!apiToken.isBlank()) {
+        request.header("authorization", "Bearer " + apiToken)
+            .header("x-service-token", apiToken);
       }
 
       HTTP.sendAsync(request.build(), HttpResponse.BodyHandlers.ofString())
-          .whenComplete((response, error) -> server.executeIfPossible(() -> handleClaimResponse(server, uuid, response, error)));
+          .whenComplete((response, error) -> server.executeIfPossible(() -> handleClaimResponse(server, uuid, matchId, response, error)));
     } catch (IllegalArgumentException error) {
       claimsInFlight.remove(uuid);
-      Sisr.LOGGER.warn("Invalid API_BASE for match {}: {}", config.matchId(), config.apiBase(), error);
+      Sisr.LOGGER.warn("Invalid API_BASE for match {}: {}", matchId, apiBase, error);
     }
   }
 
-  private void handleClaimResponse(MinecraftServer server, UUID claimant, HttpResponse<String> response, Throwable error) {
-    if (config == null) {
+  private void handleClaimResponse(MinecraftServer server, UUID claimant, String matchId, HttpResponse<String> response, Throwable error) {
+    if (config == null || !matchId.equals(config.matchId())) {
+      claimsInFlight.remove(claimant);
       return;
     }
     if (error != null || response == null || response.statusCode() / 100 != 2) {
       claimsInFlight.remove(claimant);
-      Sisr.LOGGER.warn("Claim failed for {} in match {}", claimant, config.matchId(), error);
+      Sisr.LOGGER.warn("Claim failed for {} in match {}", claimant, matchId, error);
       return;
     }
 
@@ -257,47 +261,50 @@ public final class MatchGame {
     Sisr.LOGGER.info("Pregenerated {} chunk radius for match {}", radius, config.matchId());
   }
 
-  private URI claimUri() {
-    String base = config.apiBase().endsWith("/") ? config.apiBase().substring(0, config.apiBase().length() - 1) : config.apiBase();
-    String matchId = URLEncoder.encode(config.matchId(), StandardCharsets.UTF_8);
-    return URI.create(base + "/api/match/" + matchId + "/claim");
+  private URI claimUri(String apiBase, String matchId) {
+    return matchUri(apiBase, matchId, "claim");
   }
 
   private void notifyReady() {
-    if (config.apiBase().isBlank()) {
+    String apiBase = config.apiBase();
+    String apiToken = config.apiToken();
+    String matchId = config.matchId();
+    String targetItem = config.targetItem();
+    String serverAddress = config.serverAddress();
+    List<String> players = Arrays.stream(config.allowedPlayers()).map(UUID::toString).toList();
+    if (apiBase.isBlank()) {
       return;
     }
 
     try {
-      HttpRequest.Builder request = HttpRequest.newBuilder(matchUri("ready"))
+      HttpRequest.Builder request = HttpRequest.newBuilder(matchUri(apiBase, matchId, "ready"))
           .timeout(Duration.ofSeconds(4))
           .header("content-type", "application/json")
-          .POST(HttpRequest.BodyPublishers.ofString(readyBody()));
-      if (!config.apiToken().isBlank()) {
-        request.header("authorization", "Bearer " + config.apiToken())
-            .header("x-service-token", config.apiToken());
+          .POST(HttpRequest.BodyPublishers.ofString(readyBody(matchId, targetItem, serverAddress, players)));
+      if (!apiToken.isBlank()) {
+        request.header("authorization", "Bearer " + apiToken)
+            .header("x-service-token", apiToken);
       }
 
       HTTP.sendAsync(request.build(), HttpResponse.BodyHandlers.discarding())
           .whenComplete((response, error) -> {
             if (error != null || response == null || response.statusCode() / 100 != 2) {
-              Sisr.LOGGER.warn("Ready notification failed for match {}", config.matchId(), error);
+              Sisr.LOGGER.warn("Ready notification failed for match {}", matchId, error);
             }
           });
     } catch (IllegalArgumentException error) {
-      Sisr.LOGGER.warn("Invalid API_BASE for ready notification in match {}: {}", config.matchId(), config.apiBase(), error);
+      Sisr.LOGGER.warn("Invalid API_BASE for ready notification in match {}: {}", matchId, apiBase, error);
     }
   }
 
-  private URI matchUri(String action) {
-    String base = config.apiBase().endsWith("/") ? config.apiBase().substring(0, config.apiBase().length() - 1) : config.apiBase();
-    String matchId = URLEncoder.encode(config.matchId(), StandardCharsets.UTF_8);
-    return URI.create(base + "/api/match/" + matchId + "/" + action);
+  private URI matchUri(String apiBase, String matchId, String action) {
+    String base = apiBase.endsWith("/") ? apiBase.substring(0, apiBase.length() - 1) : apiBase;
+    String encodedMatchId = URLEncoder.encode(matchId, StandardCharsets.UTF_8);
+    return URI.create(base + "/api/match/" + encodedMatchId + "/" + action);
   }
 
-  private String readyBody() {
-    List<String> players = Arrays.stream(config.allowedPlayers()).map(UUID::toString).toList();
-    return GSON.toJson(new ReadyRequest(config.matchId(), config.targetItem(), config.serverAddress(), players));
+  private String readyBody(String matchId, String targetItem, String serverAddress, List<String> players) {
+    return GSON.toJson(new ReadyRequest(matchId, targetItem, serverAddress, players));
   }
 
   private static Identifier normalizeItemId(String raw) {

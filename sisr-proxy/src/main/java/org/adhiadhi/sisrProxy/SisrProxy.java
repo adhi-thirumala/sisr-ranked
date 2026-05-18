@@ -3,6 +3,7 @@ package org.adhiadhi.sisrProxy;
 import com.google.gson.Gson;
 import com.google.gson.JsonParseException;
 import com.google.inject.Inject;
+import com.velocitypowered.api.event.EventTask;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.PlayerChooseInitialServerEvent;
@@ -12,7 +13,6 @@ import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import com.velocitypowered.api.proxy.server.ServerInfo;
-import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -72,26 +73,31 @@ public class SisrProxy {
   }
 
   @Subscribe
-  public void onPlayerChooseInitialServer(PlayerChooseInitialServerEvent event) {
+  public EventTask onPlayerChooseInitialServer(PlayerChooseInitialServerEvent event) {
     Optional<RegisteredServer> fallback = proxy.getServer(LOBBY_SERVER);
     if (apiBase == null || apiBase.isBlank()) {
       fallback.ifPresent(event::setInitialServer);
-      return;
+      return null;
     }
 
-    Route route = fetchRoute(event.getPlayer().getUniqueId());
-    if (route == null) {
-      fallback.ifPresent(event::setInitialServer);
-      return;
-    }
+    UUID uuid = event.getPlayer().getUniqueId();
+    String currentApiBase = apiBase;
+    String currentApiToken = apiToken;
+    CompletableFuture<Void> routeSelection = fetchRouteAsync(uuid, currentApiBase, currentApiToken).thenAccept(route -> {
+      if (route == null) {
+        fallback.ifPresent(event::setInitialServer);
+        return;
+      }
 
-    try {
-      RegisteredServer server = registerRoute(route);
-      event.setInitialServer(server);
-    } catch (RuntimeException ex) {
-      logger.warn("Failed to register route {} for {}", route.serverAddress(), event.getPlayer().getUniqueId(), ex);
-      fallback.ifPresent(event::setInitialServer);
-    }
+      try {
+        RegisteredServer server = registerRoute(route);
+        event.setInitialServer(server);
+      } catch (RuntimeException ex) {
+        logger.warn("Failed to register route {} for {}", route.serverAddress(), uuid, ex);
+        fallback.ifPresent(event::setInitialServer);
+      }
+    });
+    return EventTask.resumeWhenComplete(routeSelection);
   }
 
   @Subscribe
@@ -121,7 +127,7 @@ public class SisrProxy {
     cleanupIfEmpty(serverName);
   }
 
-  private Route fetchRoute(UUID uuid) {
+  private CompletableFuture<Route> fetchRouteAsync(UUID uuid, String apiBase, String apiToken) {
     try {
       HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(apiBase + "/api/route/" + uuid))
           .timeout(ROUTE_TIMEOUT)
@@ -131,7 +137,21 @@ public class SisrProxy {
         request.header("x-service-token", apiToken);
       }
 
-      HttpResponse<String> response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
+      return http.sendAsync(request.build(), HttpResponse.BodyHandlers.ofString())
+          .handle((response, error) -> parseRouteResponse(uuid, response, error));
+    } catch (RuntimeException ex) {
+      logger.warn("Route lookup for {} returned invalid data", uuid, ex);
+      return CompletableFuture.completedFuture(null);
+    }
+  }
+
+  private Route parseRouteResponse(UUID uuid, HttpResponse<String> response, Throwable error) {
+    if (error != null) {
+      logger.warn("Route lookup for {} failed", uuid, error);
+      return null;
+    }
+
+    try {
       if (response.statusCode() == 404 || response.statusCode() == 204 || response.body() == null || response.body().isBlank()) {
         return null;
       }
@@ -155,12 +175,6 @@ public class SisrProxy {
         return null;
       }
       return new Route(routeResponse.matchId(), serverAddress);
-    } catch (IOException ex) {
-      logger.warn("Route lookup for {} failed", uuid, ex);
-      return null;
-    } catch (InterruptedException ex) {
-      Thread.currentThread().interrupt();
-      return null;
     } catch (RuntimeException ex) {
       logger.warn("Route lookup for {} returned invalid data", uuid, ex);
       return null;
