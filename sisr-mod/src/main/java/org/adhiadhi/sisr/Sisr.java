@@ -3,13 +3,18 @@ package org.adhiadhi.sisr;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.fabricmc.api.ModInitializer;
+import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.server.permissions.PermissionLevel;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,7 +31,8 @@ public class Sisr implements ModInitializer {
     dispatcher.register(Commands.literal("rir")
         .requires(Sisr::canManageRace)
         .then(Commands.literal("start")
-            .then(Commands.argument("item", StringArgumentType.word())
+            .then(Commands.argument("item", StringArgumentType.greedyString())
+                .suggests((context, builder) -> SharedSuggestionProvider.suggestResource(BuiltInRegistries.ITEM.keySet(), builder))
                 .executes(context -> startManual(context.getSource(), StringArgumentType.getString(context, "item")))))
         .then(Commands.literal("stop")
             .executes(context -> stopManual(context.getSource()))));
@@ -63,8 +69,13 @@ public class Sisr implements ModInitializer {
       return 0;
     }
 
-    source.sendSuccess(() -> Component.literal("Started Random Item Race for " + config.targetItem()), true);
+    source.sendSuccess(() -> Component.literal("Started Random Item Race for ").append(itemName(config.targetItem())), true);
     return 1;
+  }
+
+  private static Component itemName(String itemId) {
+    Item item = BuiltInRegistries.ITEM.getValue(Identifier.parse(itemId));
+    return item.getName(new ItemStack(item));
   }
 
   private static int stopManual(CommandSourceStack source) {

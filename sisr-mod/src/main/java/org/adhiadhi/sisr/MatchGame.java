@@ -24,6 +24,7 @@ import net.minecraft.server.level.ServerBossEvent;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.BossEvent;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 
@@ -57,13 +58,13 @@ public final class MatchGame {
     targetItem = BuiltInRegistries.ITEM.getValue(itemId);
     startedTick = server.getTickCount();
     endingTicks = -1;
-    bossBar = new ServerBossEvent(UUID.randomUUID(), title("Current Item: " + config.targetItem()),
+    bossBar = new ServerBossEvent(UUID.randomUUID(), currentItemTitle("Current Item: "),
         BossEvent.BossBarColor.BLUE, BossEvent.BossBarOverlay.PROGRESS);
     bossBar.setProgress(1.0f);
 
     pregenerateSpawn(server, config.pregenRadius());
     notifyReady();
-    broadcast(server, "Random Item Race started. Current Item: " + config.targetItem());
+    broadcast(server, currentItemTitle("Random Item Race started. Current Item: "));
     Sisr.LOGGER.info("Started match {} for {}", config.matchId(), config.targetItem());
     for (ServerPlayer player : server.getPlayerList().getPlayers()) {
       onPlayerJoin(player);
@@ -121,7 +122,6 @@ public final class MatchGame {
       return;
     }
     bossBar.addPlayer(player);
-    player.sendSystemMessage(title("Current Item: " + config.targetItem()));
     onInventoryChanged(player);
   }
 
@@ -222,13 +222,13 @@ public final class MatchGame {
     }
 
     if (winner == null) {
-      bossBar.setName(title("Match timed out. Current Item: " + config.targetItem()));
+      bossBar.setName(currentItemTitle("Match timed out. Current Item: "));
       broadcast(server, "Random Item Race timed out.");
     } else {
       ServerPlayer player = server.getPlayerList().getPlayer(winner);
       String name = player == null ? winner.toString() : player.getName().getString();
-      bossBar.setName(title("Winner: " + name + " - Item: " + config.targetItem()));
-      broadcast(server, name + " found " + config.targetItem() + "!");
+      bossBar.setName(Component.literal("Winner: " + name + " - Item: ").append(targetItemName()));
+      broadcast(server, Component.literal(name + " found ").append(targetItemName()).append("!"));
     }
     bossBar.setProgress(0.0f);
     endingTicks = RESULT_TICKS;
@@ -339,11 +339,23 @@ public final class MatchGame {
   }
 
   private static void broadcast(MinecraftServer server, String message) {
-    server.getPlayerList().broadcastSystemMessage(title(message), false);
+    broadcast(server, title(message));
+  }
+
+  private static void broadcast(MinecraftServer server, Component message) {
+    server.getPlayerList().broadcastSystemMessage(message, false);
   }
 
   private static Component title(String text) {
     return Component.literal(text);
+  }
+
+  private Component currentItemTitle(String prefix) {
+    return Component.literal(prefix).append(targetItemName());
+  }
+
+  private Component targetItemName() {
+    return targetItem.getName(new ItemStack(targetItem));
   }
 
   private record ClaimRequest(String uuid) {}
