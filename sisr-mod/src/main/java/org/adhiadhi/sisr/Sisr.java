@@ -44,6 +44,10 @@ public class Sisr implements ModInitializer {
     GAME.onPlayerLeave(player);
   }
 
+  public static void onInventoryChanged(ServerPlayer player) {
+    GAME.onInventoryChanged(player);
+  }
+
   public static boolean startMatch(MinecraftServer server, MatchConfig config) {
     return GAME.start(server, config);
   }

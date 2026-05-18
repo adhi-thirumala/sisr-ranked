@@ -1,5 +1,7 @@
 package org.adhiadhi.sisrProxy;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonParseException;
 import com.google.inject.Inject;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.player.KickedFromServerEvent;
@@ -18,22 +20,20 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.WebSocket;
 import java.time.Duration;
-import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import net.kyori.adventure.text.Component;
 import org.slf4j.Logger;
 
 public class SisrProxy {
   private static final String LOBBY_SERVER = "lobby";
   private static final Duration ROUTE_TIMEOUT = Duration.ofMillis(1200);
+  private static final Gson GSON = new Gson();
 
   @Inject
   private Logger logger;
@@ -140,18 +140,21 @@ public class SisrProxy {
         return null;
       }
 
-      String matchId = jsonString(response.body(), "matchId");
-      String serverAddress = jsonString(response.body(), "serverAddress");
+      RouteResponse routeResponse = GSON.fromJson(response.body(), RouteResponse.class);
+      if (routeResponse == null) {
+        return null;
+      }
+      String serverAddress = routeResponse.serverAddress();
       if (serverAddress == null) {
-        serverAddress = jsonString(response.body(), "address");
+        serverAddress = routeResponse.address();
       }
-      if (Boolean.FALSE.equals(jsonBoolean(response.body(), "ready"))) {
+      if (Boolean.FALSE.equals(routeResponse.ready())) {
         return null;
       }
-      if (matchId == null || matchId.isBlank() || serverAddress == null || serverAddress.isBlank()) {
+      if (routeResponse.matchId() == null || routeResponse.matchId().isBlank() || serverAddress == null || serverAddress.isBlank()) {
         return null;
       }
-      return new Route(matchId, serverAddress);
+      return new Route(routeResponse.matchId(), serverAddress);
     } catch (IOException ex) {
       logger.warn("Route lookup for {} failed", uuid, ex);
       return null;
@@ -202,22 +205,29 @@ public class SisrProxy {
   }
 
   private void handleEvent(String message) {
-    if (!"match_ready".equals(jsonString(message, "type"))) {
+    ReadyEventMessage eventMessage;
+    try {
+      eventMessage = GSON.fromJson(message, ReadyEventMessage.class);
+    } catch (JsonParseException ex) {
+      logger.warn("Ignoring invalid match_ready event: {}", message);
+      return;
+    }
+    if (eventMessage == null || !"match_ready".equals(eventMessage.type())) {
       return;
     }
 
-    String matchId = jsonString(message, "matchId");
-    String serverAddress = jsonString(message, "serverAddress");
+    String serverAddress = eventMessage.serverAddress();
     if (serverAddress == null) {
-      serverAddress = jsonString(message, "address");
+      serverAddress = eventMessage.address();
     }
-    Set<UUID> players = jsonUuidArray(message, "players");
-    if (matchId == null || matchId.isBlank() || serverAddress == null || serverAddress.isBlank() || players.isEmpty()) {
+    List<UUID> players = eventMessage.players();
+    if (eventMessage.matchId() == null || eventMessage.matchId().isBlank() || serverAddress == null || serverAddress.isBlank()
+        || players == null || players.isEmpty()) {
       logger.warn("Ignoring invalid match_ready event: {}", message);
       return;
     }
 
-    ReadyEvent event = new ReadyEvent(matchId, serverAddress, players);
+    ReadyEvent event = new ReadyEvent(eventMessage.matchId(), serverAddress, players);
     proxy.getScheduler().buildTask(this, () -> moveReadyPlayers(event)).schedule();
   }
 
@@ -313,48 +323,6 @@ public class SisrProxy {
     return name.replaceAll("[^A-Za-z0-9_.-]", "-");
   }
 
-  private static String jsonString(String json, String field) {
-    String pattern = "\\\"" + Pattern.quote(field) + "\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"";
-    Matcher matcher = Pattern.compile(pattern).matcher(json);
-    return matcher.find() ? matcher.group(1) : null;
-  }
-
-  private static Boolean jsonBoolean(String json, String field) {
-    String pattern = "\\\"" + Pattern.quote(field) + "\\\"\\s*:\\s*(true|false)";
-    Matcher matcher = Pattern.compile(pattern).matcher(json);
-    return matcher.find() ? Boolean.parseBoolean(matcher.group(1)) : null;
-  }
-
-  private static Set<UUID> jsonUuidArray(String json, String field) {
-    String pattern = "\\\"" + Pattern.quote(field) + "\\\"\\s*:\\s*\\[(.*?)]";
-    Matcher array = Pattern.compile(pattern, Pattern.DOTALL).matcher(json);
-    if (!array.find()) {
-      return Set.of();
-    }
-
-    Set<UUID> uuids = new LinkedHashSet<>();
-    Matcher values = Pattern.compile("\\\"([^\\\"]+)\\\"").matcher(array.group(1));
-    while (values.find()) {
-      UUID uuid = parseUuid(values.group(1));
-      if (uuid != null) {
-        uuids.add(uuid);
-      }
-    }
-    return uuids;
-  }
-
-  private static UUID parseUuid(String value) {
-    try {
-      if (value.length() == 32) {
-        value = value.substring(0, 8) + "-" + value.substring(8, 12) + "-" +
-            value.substring(12, 16) + "-" + value.substring(16, 20) + "-" + value.substring(20);
-      }
-      return UUID.fromString(value);
-    } catch (IllegalArgumentException ignored) {
-      return null;
-    }
-  }
-
   private static String firstEnv(String first, String second) {
     String value = System.getenv(first);
     return value == null || value.isBlank() ? System.getenv(second) : value;
@@ -379,7 +347,11 @@ public class SisrProxy {
 
   private record Route(String matchId, String serverAddress) {}
 
-  private record ReadyEvent(String matchId, String serverAddress, Set<UUID> players) {}
+  private record RouteResponse(String matchId, String serverAddress, String address, Boolean ready) {}
+
+  private record ReadyEvent(String matchId, String serverAddress, List<UUID> players) {}
+
+  private record ReadyEventMessage(String type, String matchId, String serverAddress, String address, List<UUID> players) {}
 
   private final class EventSocketListener implements WebSocket.Listener {
     private final StringBuilder message = new StringBuilder();

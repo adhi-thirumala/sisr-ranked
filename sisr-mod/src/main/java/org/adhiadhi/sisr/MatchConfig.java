@@ -1,15 +1,14 @@
 package org.adhiadhi.sisr;
 
-import java.util.Collections;
-import java.util.LinkedHashSet;
-import java.util.Set;
+import com.mojang.util.UndashedUuid;
+import java.util.Arrays;
 import java.util.UUID;
 import net.minecraft.server.MinecraftServer;
 
 public record MatchConfig(
     String matchId,
     String targetItem,
-    Set<UUID> allowedPlayers,
+    UUID[] allowedPlayers,
     String apiBase,
     String apiToken,
     String serverAddress,
@@ -23,7 +22,7 @@ public record MatchConfig(
     return new MatchConfig(
         "manual-" + server.getTickCount(),
         targetItem,
-        Collections.emptySet(),
+        new UUID[0],
         "",
         "",
         "",
@@ -53,20 +52,22 @@ public record MatchConfig(
         timeoutTicks, pregenRadius, shutdownOnEnd);
   }
 
-  private static Set<UUID> parseAllowedPlayers() {
+  private static UUID[] parseAllowedPlayers() {
     String value = env("ALLOWED_UUIDS", "");
     if (value.isBlank()) {
-      return Collections.emptySet();
+      return new UUID[0];
     }
 
-    Set<UUID> uuids = new LinkedHashSet<>();
-    for (String raw : value.split(",")) {
+    String[] rawUuids = value.split(",");
+    UUID[] uuids = new UUID[rawUuids.length];
+    int count = 0;
+    for (String raw : rawUuids) {
       UUID uuid = parseUuid(raw.trim());
       if (uuid != null) {
-        uuids.add(uuid);
+        uuids[count++] = uuid;
       }
     }
-    return Collections.unmodifiableSet(uuids);
+    return Arrays.copyOf(uuids, count);
   }
 
   private static UUID parseUuid(String value) {
@@ -74,11 +75,7 @@ public record MatchConfig(
       return null;
     }
     try {
-      if (value.length() == 32) {
-        value = value.substring(0, 8) + "-" + value.substring(8, 12) + "-" +
-            value.substring(12, 16) + "-" + value.substring(16, 20) + "-" + value.substring(20);
-      }
-      return UUID.fromString(value);
+      return UndashedUuid.fromStringLenient(value);
     } catch (IllegalArgumentException ignored) {
       Sisr.LOGGER.warn("Ignoring invalid ALLOWED_UUIDS entry: {}", value);
       return null;

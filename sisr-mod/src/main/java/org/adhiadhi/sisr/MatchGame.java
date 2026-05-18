@@ -1,5 +1,8 @@
 package org.adhiadhi.sisr;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonParseException;
+import com.mojang.util.UndashedUuid;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -7,6 +10,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
@@ -24,6 +29,7 @@ import net.minecraft.world.level.chunk.status.ChunkStatus;
 
 public final class MatchGame {
   private static final int RESULT_TICKS = 10 * 20;
+  private static final Gson GSON = new Gson();
   private static final HttpClient HTTP = HttpClient.newBuilder()
       .connectTimeout(Duration.ofSeconds(2))
       .build();
@@ -57,11 +63,11 @@ public final class MatchGame {
 
     pregenerateSpawn(server, config.pregenRadius());
     notifyReady();
+    broadcast(server, "Random Item Race started. Current Item: " + config.targetItem());
+    Sisr.LOGGER.info("Started match {} for {}", config.matchId(), config.targetItem());
     for (ServerPlayer player : server.getPlayerList().getPlayers()) {
       onPlayerJoin(player);
     }
-    broadcast(server, "Random Item Race started. Current Item: " + config.targetItem());
-    Sisr.LOGGER.info("Started match {} for {}", config.matchId(), config.targetItem());
     return true;
   }
 
@@ -102,13 +108,6 @@ public final class MatchGame {
     bossBar.setProgress(Math.max(0.0f, 1.0f - (float) elapsed / Math.max(1, config.timeoutTicks())));
     if (elapsed >= config.timeoutTicks()) {
       finish(server, null);
-      return;
-    }
-
-    for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-      if (isAllowed(player) && hasTargetItem(player)) {
-        claim(server, player);
-      }
     }
   }
 
@@ -123,6 +122,7 @@ public final class MatchGame {
     }
     bossBar.addPlayer(player);
     player.sendSystemMessage(title("Current Item: " + config.targetItem()));
+    onInventoryChanged(player);
   }
 
   public void onPlayerLeave(ServerPlayer player) {
@@ -132,6 +132,14 @@ public final class MatchGame {
     MinecraftServer server = player.level().getServer();
     if (config != null && config.shutdownOnEnd() && endingTicks < 0 && noAssignedPlayersOnline(server)) {
       finish(server, null);
+    }
+  }
+
+  public void onInventoryChanged(ServerPlayer player) {
+    MinecraftServer server = player.level().getServer();
+    startFromEnvironment(server);
+    if (config != null && endingTicks < 0 && isAllowed(player) && hasTargetItem(player)) {
+      claim(server, player);
     }
   }
 
@@ -148,7 +156,16 @@ public final class MatchGame {
   }
 
   private boolean isAllowed(ServerPlayer player) {
-    return config.allowedPlayers().isEmpty() || config.allowedPlayers().contains(player.getUUID());
+    if (config.allowedPlayers().length == 0) {
+      return true;
+    }
+    UUID uuid = player.getUUID();
+    for (UUID allowedPlayer : config.allowedPlayers()) {
+      if (allowedPlayer.equals(uuid)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private boolean hasTargetItem(ServerPlayer player) {
@@ -167,7 +184,7 @@ public final class MatchGame {
     }
 
     try {
-      String body = "{\"uuid\":\"" + uuid + "\"}";
+      String body = GSON.toJson(new ClaimRequest(uuid.toString()));
       HttpRequest.Builder request = HttpRequest.newBuilder(claimUri())
           .timeout(Duration.ofSeconds(4))
           .header("content-type", "application/json")
@@ -279,26 +296,8 @@ public final class MatchGame {
   }
 
   private String readyBody() {
-    return "{\"matchId\":\"" + jsonEscape(config.matchId()) + "\",\"targetItem\":\"" +
-        jsonEscape(config.targetItem()) + "\",\"serverAddress\":\"" + jsonEscape(config.serverAddress()) +
-        "\",\"players\":" + playersJson() + "}";
-  }
-
-  private String playersJson() {
-    StringBuilder builder = new StringBuilder("[");
-    boolean first = true;
-    for (UUID uuid : config.allowedPlayers()) {
-      if (!first) {
-        builder.append(',');
-      }
-      first = false;
-      builder.append('"').append(uuid).append('"');
-    }
-    return builder.append(']').toString();
-  }
-
-  private static String jsonEscape(String value) {
-    return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    List<String> players = Arrays.stream(config.allowedPlayers()).map(UUID::toString).toList();
+    return GSON.toJson(new ReadyRequest(config.matchId(), config.targetItem(), config.serverAddress(), players));
   }
 
   private static Identifier normalizeItemId(String raw) {
@@ -310,30 +309,33 @@ public final class MatchGame {
   }
 
   private static UUID parseWinner(String json) {
-    String value = jsonString(json, "winnerUuid");
-    if (value == null) {
-      value = jsonString(json, "winner");
-    }
-    if (value == null) {
+    if (json == null || json.isBlank()) {
       return null;
     }
     try {
-      return UUID.fromString(value);
-    } catch (IllegalArgumentException ignored) {
+      ClaimResponse response = GSON.fromJson(json, ClaimResponse.class);
+      if (response == null) {
+        return null;
+      }
+      String value = response.winnerUuid();
+      if (value == null || value.isBlank()) {
+        value = response.winner();
+      }
+      return parseUuid(value);
+    } catch (JsonParseException ignored) {
       return null;
     }
   }
 
-  private static String jsonString(String json, String key) {
-    String needle = "\"" + key + "\"";
-    int keyIndex = json.indexOf(needle);
-    if (keyIndex < 0) {
+  private static UUID parseUuid(String value) {
+    if (value == null || value.isBlank()) {
       return null;
     }
-    int colon = json.indexOf(':', keyIndex + needle.length());
-    int start = colon < 0 ? -1 : json.indexOf('"', colon + 1);
-    int end = start < 0 ? -1 : json.indexOf('"', start + 1);
-    return end < 0 ? null : json.substring(start + 1, end);
+    try {
+      return UndashedUuid.fromStringLenient(value);
+    } catch (IllegalArgumentException ignored) {
+      return null;
+    }
   }
 
   private static void broadcast(MinecraftServer server, String message) {
@@ -343,4 +345,10 @@ public final class MatchGame {
   private static Component title(String text) {
     return Component.literal(text);
   }
+
+  private record ClaimRequest(String uuid) {}
+
+  private record ReadyRequest(String matchId, String targetItem, String serverAddress, List<String> players) {}
+
+  private record ClaimResponse(String winnerUuid, String winner) {}
 }
