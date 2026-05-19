@@ -3,9 +3,10 @@ import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { allocateMatch, stopMatch } from './allocator';
 import type { MatchPlayer, QueueEntry, RirEnv } from './env';
-import { pendingKey, PENDING_TTL_SECONDS, QUEUE_WIDEN_AFTER_MS } from './env';
+import { pendingKey, PENDING_TTL_SECONDS, QUEUE_WIDEN_AFTER_MS, routeKey } from './env';
 import { internalHeaders, isWebSocketUpgrade, requireInternal } from './http';
 import { chooseTargetItem } from './items';
+import { normalizeUuid } from './uuid';
 
 const restoreSchema = z.object({
   uuid: z.string(),
@@ -76,9 +77,10 @@ export class Queue extends DurableObject {
     const rawUser = request.headers.get('x-rir-user');
     const bracketName = request.headers.get('x-rir-bracket');
     if (!rawUser || !bracketName) return errorResponse(400, 'Missing queue context');
-    const user = z
+    const rawUserInput = z
       .object({ uuid: z.string(), name: z.string(), elo: z.number() })
       .parse(JSON.parse(rawUser)) as { uuid: string; name: string; elo: number };
+    const user = { ...rawUserInput, uuid: normalizeUuid(rawUserInput.uuid) };
 
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -124,7 +126,8 @@ export class Queue extends DurableObject {
 
   private async handleRestore(request: Request): Promise<Response> {
     requireInternal(request);
-    const waiter = restoreSchema.parse(await parseJson(request));
+    const rawWaiter = restoreSchema.parse(await parseJson(request));
+    const waiter = { ...rawWaiter, uuid: normalizeUuid(rawWaiter.uuid) };
     await this.state.blockConcurrencyWhile(async () => {
       await this.state.storage.put(queueKey(waiter.uuid), waiter);
       await this.sendQueuePosition(waiter.uuid);
@@ -136,7 +139,7 @@ export class Queue extends DurableObject {
   private async handleNotifyMatch(request: Request): Promise<Response> {
     requireInternal(request);
     const { uuid, message } = notifySchema.parse(await parseJson(request));
-    await this.notifyLocalWaiter(uuid, message);
+    await this.notifyLocalWaiter(normalizeUuid(uuid), message);
     return Response.json({ ok: true });
   }
 
@@ -246,7 +249,7 @@ export class Queue extends DurableObject {
       await Promise.allSettled(waiters.map((waiter) => this.notifyWaiter(waiter, message)));
     } catch (error) {
       if (allocated) await stopMatch(this.bindings, matchId).catch(() => undefined);
-      await Promise.all(players.map((uuid) => this.bindings.ROUTING.delete(`route:${uuid.toLowerCase()}`)));
+      await Promise.all(players.map((uuid) => this.bindings.ROUTING.delete(routeKey(uuid))));
       throw error;
     }
   }
@@ -343,11 +346,11 @@ function neighborBrackets(name: string): string[] {
 }
 
 function queueKey(uuid: string): string {
-  return `q:${uuid.toLowerCase()}`;
+  return `q:${normalizeUuid(uuid)}`;
 }
 
 function userTag(uuid: string): string {
-  return `user:${uuid.toLowerCase()}`;
+  return `user:${normalizeUuid(uuid)}`;
 }
 
 function createWorldSeed(): string {

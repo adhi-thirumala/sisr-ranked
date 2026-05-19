@@ -6,6 +6,7 @@ import { calculateOneVOneElo } from './elo';
 import type { MatchMeta, RirEnv, RouteEntry } from './env';
 import { LEADERBOARD_CACHE_KEY, routeKey, ROUTE_TTL_SECONDS, VELOCITY_HUB_NAME } from './env';
 import { internalHeaders, isWebSocketUpgrade, nowSeconds, requireInternal } from './http';
+import { normalizeUuid, uuidFromBlob, uuidToBlob } from './uuid';
 
 const playerSchema = z.object({
   uuid: z.string(),
@@ -74,7 +75,8 @@ export class Match extends DurableObject {
     if (!isWebSocketUpgrade(request)) return errorResponse(426, 'Expected WebSocket upgrade');
     const rawUser = request.headers.get('x-rir-user');
     if (!rawUser) return errorResponse(401, 'Unauthorized');
-    const user = z.object({ uuid: z.string() }).parse(JSON.parse(rawUser));
+    const rawUserInput = z.object({ uuid: z.string() }).parse(JSON.parse(rawUser));
+    const user = { uuid: normalizeUuid(rawUserInput.uuid) };
     const meta = await this.getMeta();
     const isPlayer = Boolean(meta?.players.some((player) => player.uuid === user.uuid));
 
@@ -110,12 +112,13 @@ export class Match extends DurableObject {
   private async handleSeed(request: Request): Promise<Response> {
     requireInternal(request);
     const input = seedSchema.parse(await parseJson(request));
+    const players = input.players.map((player) => ({ ...player, uuid: normalizeUuid(player.uuid) }));
     const existing = await this.getMeta();
     if (existing) return Response.json(existing);
 
     const meta: MatchMeta = {
       matchId: input.matchId,
-      players: input.players,
+      players,
       targetItem: input.targetItem,
       worldSeed: input.worldSeed,
       serverName: input.serverName,
@@ -133,7 +136,7 @@ export class Match extends DurableObject {
       ...meta.players.map((player) =>
         this.bindings.DB
           .prepare('INSERT OR IGNORE INTO match_players (match_id, mc_uuid, elo_before) VALUES (?, ?, ?)')
-          .bind(meta.matchId, player.uuid, player.eloBefore),
+          .bind(meta.matchId, uuidToBlob(player.uuid), player.eloBefore),
       ),
     ]);
 
@@ -178,7 +181,7 @@ export class Match extends DurableObject {
     let result: unknown;
 
     await this.state.blockConcurrencyWhile(async () => {
-      result = await this.claim(uuid.toLowerCase());
+      result = await this.claim(normalizeUuid(uuid));
     });
 
     return Response.json(result);
@@ -208,12 +211,13 @@ export class Match extends DurableObject {
     const statements: D1PreparedStatement[] = [
       this.bindings.DB
         .prepare('UPDATE matches SET winner_uuid = ?, ended_at = ? WHERE match_id = ? AND winner_uuid IS NULL')
-        .bind(uuid, endedAt, meta.matchId),
+        .bind(uuidToBlob(uuid), endedAt, meta.matchId),
     ];
 
     for (const player of meta.players) {
       const outcome = outcomes[player.uuid];
       const won = player.uuid === uuid ? 1 : 0;
+      const playerUuidBlob = uuidToBlob(player.uuid);
       statements.push(
         this.bindings.DB
           .prepare(
@@ -222,10 +226,10 @@ export class Match extends DurableObject {
              WHERE mc_uuid = ?
                AND EXISTS (
                  SELECT 1 FROM match_players
-                 WHERE match_id = ? AND mc_uuid = ? AND elo_after IS NULL
-               )`,
+                  WHERE match_id = ? AND mc_uuid = ? AND elo_after IS NULL
+                )`,
           )
-          .bind(outcome.after, won, player.uuid, meta.matchId, player.uuid),
+          .bind(outcome.after, won, playerUuidBlob, meta.matchId, playerUuidBlob),
       );
       statements.push(
         this.bindings.DB
@@ -234,7 +238,7 @@ export class Match extends DurableObject {
              SET elo_after = ?, placement = ?
              WHERE match_id = ? AND mc_uuid = ? AND elo_after IS NULL`,
           )
-          .bind(outcome.after, outcome.placement, meta.matchId, player.uuid),
+          .bind(outcome.after, outcome.placement, meta.matchId, playerUuidBlob),
       );
     }
 
@@ -278,8 +282,8 @@ export class Match extends DurableObject {
     const row = await this.bindings.DB
       .prepare('SELECT winner_uuid FROM matches WHERE match_id = ? AND winner_uuid IS NOT NULL')
       .bind(matchId)
-      .first<{ winner_uuid: string }>();
-    return row?.winner_uuid ?? null;
+      .first<{ winner_uuid: ArrayBuffer }>();
+    return row ? uuidFromBlob(row.winner_uuid) : null;
   }
 
   private broadcastToPlayers(meta: MatchMeta, message: unknown): void {
@@ -317,7 +321,7 @@ function publicMatchState(meta: MatchMeta): Record<string, unknown> {
 }
 
 function playerTag(uuid: string): string {
-  return `player:${uuid.toLowerCase()}`;
+  return `player:${normalizeUuid(uuid)}`;
 }
 
 function errorResponse(status: number, message: string): Response {

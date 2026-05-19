@@ -92,7 +92,7 @@ app.get('/api/match/:matchId/state', (c) => {
 app.get('/api/leaderboard', async (c) => c.json({ leaderboard: await getLeaderboard(c.env) }));
 
 app.get('/api/profile/:uuid', async (c) => {
-  const profile = await getProfile(c.env.DB, c.req.param('uuid').toLowerCase());
+  const profile = await getProfile(c.env.DB, c.req.param('uuid'));
   if (!profile) return c.json({ error: 'Profile not found' }, 404);
   return c.json({ profile });
 });

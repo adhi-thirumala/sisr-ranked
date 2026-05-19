@@ -188,7 +188,7 @@ SQLite at the edge. Schema is small and stable.
 
 ```sql
 CREATE TABLE users (
-  mc_uuid     TEXT PRIMARY KEY,        -- canonical hyphenated UUID
+  mc_uuid     BLOB PRIMARY KEY CHECK(length(mc_uuid) = 16), -- 16-byte UUID
   mc_name     TEXT NOT NULL,           -- current MC username, refreshed on login
   elo         REAL NOT NULL DEFAULT 1000,
   matches     INTEGER NOT NULL DEFAULT 0,
@@ -199,14 +199,14 @@ CREATE TABLE users (
 CREATE TABLE matches (
   match_id    TEXT PRIMARY KEY,
   target_item TEXT NOT NULL,            -- e.g. minecraft:diamond
-  winner_uuid TEXT,
+  winner_uuid BLOB CHECK(winner_uuid IS NULL OR length(winner_uuid) = 16),
   started_at  INTEGER NOT NULL,
   ended_at    INTEGER
 );
 
 CREATE TABLE match_players (
   match_id    TEXT NOT NULL REFERENCES matches(match_id),
-  mc_uuid     TEXT NOT NULL REFERENCES users(mc_uuid),
+  mc_uuid     BLOB NOT NULL REFERENCES users(mc_uuid) CHECK(length(mc_uuid) = 16),
   elo_before  REAL NOT NULL,
   elo_after   REAL,
   placement   INTEGER,                  -- 1 = winner, NULL = forfeit/disconnect

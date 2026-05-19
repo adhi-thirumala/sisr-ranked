@@ -1,6 +1,5 @@
 package org.adhiadhi.sisr;
 
-import com.mojang.util.UndashedUuid;
 import java.util.Arrays;
 import java.util.UUID;
 import net.minecraft.server.MinecraftServer;
@@ -75,7 +74,7 @@ public record MatchConfig(
       return null;
     }
     try {
-      return UndashedUuid.fromStringLenient(value);
+      return UUID.fromString(value);
     } catch (IllegalArgumentException ignored) {
       Sisr.LOGGER.warn("Ignoring invalid ALLOWED_UUIDS entry: {}", value);
       return null;

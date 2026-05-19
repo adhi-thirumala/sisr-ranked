@@ -1,3 +1,5 @@
+import { normalizeUuid } from './uuid';
+
 export interface RirEnv {
   ASSETS: Fetcher;
   DB: D1Database;
@@ -70,9 +72,9 @@ export const QUEUE_WIDEN_AFTER_MS = 30_000;
 export const VELOCITY_HUB_NAME = 'velocity:events';
 
 export function routeKey(uuid: string): string {
-  return `route:${uuid.toLowerCase()}`;
+  return `route:${normalizeUuid(uuid)}`;
 }
 
 export function pendingKey(uuid: string): string {
-  return `pending:${uuid.toLowerCase()}`;
+  return `pending:${normalizeUuid(uuid)}`;
 }

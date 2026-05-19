@@ -9,6 +9,7 @@ import {
   type RirContext,
 } from './session';
 import { upsertUser } from './db';
+import { normalizeUuid } from './uuid';
 
 const xblTokenSchema = z.object({
   Token: z.string(),
@@ -46,7 +47,7 @@ export async function finishMicrosoftAuth(c: RirContext): Promise<Response> {
   const userHash = xsts.DisplayClaims.xui[0].uhs;
   const minecraftAccessToken = await loginWithMinecraft(userHash, xsts.Token);
   const profile = await fetchMinecraftProfile(minecraftAccessToken);
-  const uuid = hyphenateMinecraftUuid(profile.id);
+  const uuid = parseMinecraftUuid(profile.id);
 
   await upsertUser(c.env.DB, uuid, profile.name);
 
@@ -152,10 +153,12 @@ async function parseOAuthResponse(response: Response, fallback: string): Promise
   throw new Error(`${fallback}: ${JSON.stringify(json)}`);
 }
 
-function hyphenateMinecraftUuid(value: string): string {
-  const normalized = value.replaceAll('-', '').toLowerCase();
-  if (!/^[0-9a-f]{32}$/.test(normalized)) throw new Error('Minecraft returned an invalid UUID');
-  return `${normalized.slice(0, 8)}-${normalized.slice(8, 12)}-${normalized.slice(12, 16)}-${normalized.slice(16, 20)}-${normalized.slice(20)}`;
+function parseMinecraftUuid(value: string): string {
+  try {
+    return normalizeUuid(value);
+  } catch {
+    throw new Error('Minecraft returned an invalid UUID');
+  }
 }
 
 function redirectWithError(c: RirContext, message: string): Response {

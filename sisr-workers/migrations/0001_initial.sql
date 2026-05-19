@@ -1,5 +1,5 @@
 CREATE TABLE users (
-  mc_uuid     TEXT PRIMARY KEY,
+  mc_uuid     BLOB PRIMARY KEY CHECK(length(mc_uuid) = 16),
   mc_name     TEXT NOT NULL,
   elo         REAL NOT NULL DEFAULT 1000,
   matches     INTEGER NOT NULL DEFAULT 0,
@@ -10,14 +10,14 @@ CREATE TABLE users (
 CREATE TABLE matches (
   match_id    TEXT PRIMARY KEY,
   target_item TEXT NOT NULL,
-  winner_uuid TEXT,
+  winner_uuid BLOB CHECK(winner_uuid IS NULL OR length(winner_uuid) = 16),
   started_at  INTEGER NOT NULL,
   ended_at    INTEGER
 );
 
 CREATE TABLE match_players (
   match_id    TEXT NOT NULL REFERENCES matches(match_id),
-  mc_uuid     TEXT NOT NULL REFERENCES users(mc_uuid),
+  mc_uuid     BLOB NOT NULL REFERENCES users(mc_uuid) CHECK(length(mc_uuid) = 16),
   elo_before  REAL NOT NULL,
   elo_after   REAL,
   placement   INTEGER,

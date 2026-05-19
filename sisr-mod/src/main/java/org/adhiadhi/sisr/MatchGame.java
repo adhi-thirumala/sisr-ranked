@@ -2,7 +2,6 @@ package org.adhiadhi.sisr;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonParseException;
-import com.mojang.util.UndashedUuid;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -339,7 +338,7 @@ public final class MatchGame {
       return null;
     }
     try {
-      return UndashedUuid.fromStringLenient(value);
+      return UUID.fromString(value.trim());
     } catch (IllegalArgumentException ignored) {
       return null;
     }
