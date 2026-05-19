@@ -1,9 +1,10 @@
 import { DurableObject } from 'cloudflare:workers';
+import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { allocateMatch, stopMatch } from './allocator';
 import type { MatchPlayer, QueueEntry, RirEnv } from './env';
 import { pendingKey, PENDING_TTL_SECONDS, QUEUE_WIDEN_AFTER_MS } from './env';
-import { errorResponse, HttpError, internalHeaders, isWebSocketUpgrade, jsonResponse, parseJson, requireInternal } from './http';
+import { internalHeaders, isWebSocketUpgrade, requireInternal } from './http';
 import { chooseTargetItem } from './items';
 
 const restoreSchema = z.object({
@@ -43,7 +44,7 @@ export class Queue extends DurableObject {
       if (url.pathname === '/notify-match' && request.method === 'POST') return this.handleNotifyMatch(request);
       return errorResponse(404, 'Not found');
     } catch (error) {
-      if (error instanceof HttpError) return errorResponse(error.status, error.message);
+      if (error instanceof HTTPException) return errorResponse(error.status, error.message);
       return errorResponse(500, error instanceof Error ? error.message : 'Queue error');
     }
   }
@@ -117,7 +118,7 @@ export class Queue extends DurableObject {
       const [waiter] = waiters;
       await this.state.storage.delete(queueKey(waiter.uuid));
       await this.state.storage.put('bracketName', bracketName);
-      return jsonResponse({ waiter });
+      return Response.json({ waiter });
     });
   }
 
@@ -129,14 +130,14 @@ export class Queue extends DurableObject {
       await this.sendQueuePosition(waiter.uuid);
       await this.scheduleNextAlarm();
     });
-    return jsonResponse({ ok: true });
+    return Response.json({ ok: true });
   }
 
   private async handleNotifyMatch(request: Request): Promise<Response> {
     requireInternal(request);
     const { uuid, message } = notifySchema.parse(await parseJson(request));
     await this.notifyLocalWaiter(uuid, message);
-    return jsonResponse({ ok: true });
+    return Response.json({ ok: true });
   }
 
   private async tryFormLocalMatches(): Promise<void> {
@@ -353,4 +354,16 @@ function createWorldSeed(): string {
   const bytes = new Uint32Array(2);
   crypto.getRandomValues(bytes);
   return `${bytes[0]}${bytes[1]}`;
+}
+
+function errorResponse(status: number, message: string): Response {
+  return Response.json({ error: message }, { status });
+}
+
+async function parseJson<T>(request: Request): Promise<T> {
+  try {
+    return (await request.json()) as T;
+  } catch {
+    throw new HTTPException(400, { message: 'Invalid JSON body' });
+  }
 }

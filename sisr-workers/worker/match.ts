@@ -1,10 +1,11 @@
 import { DurableObject } from 'cloudflare:workers';
+import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { stopMatch } from './allocator';
 import { calculateOneVOneElo } from './elo';
 import type { MatchMeta, RirEnv, RouteEntry } from './env';
 import { LEADERBOARD_CACHE_KEY, routeKey, ROUTE_TTL_SECONDS, VELOCITY_HUB_NAME } from './env';
-import { errorResponse, HttpError, internalHeaders, isWebSocketUpgrade, jsonResponse, nowSeconds, parseJson, requireInternal } from './http';
+import { internalHeaders, isWebSocketUpgrade, nowSeconds, requireInternal } from './http';
 
 const playerSchema = z.object({
   uuid: z.string(),
@@ -56,7 +57,7 @@ export class Match extends DurableObject {
       if (url.pathname === '/state' && request.method === 'GET') return this.handleState();
       return errorResponse(404, 'Not found');
     } catch (error) {
-      if (error instanceof HttpError) return errorResponse(error.status, error.message);
+      if (error instanceof HTTPException) return errorResponse(error.status, error.message);
       return errorResponse(500, error instanceof Error ? error.message : 'Match error');
     }
   }
@@ -103,14 +104,14 @@ export class Match extends DurableObject {
     requireInternal(request);
     const message = await parseJson(request);
     this.broadcastToTag('velocity', message);
-    return jsonResponse({ ok: true });
+    return Response.json({ ok: true });
   }
 
   private async handleSeed(request: Request): Promise<Response> {
     requireInternal(request);
     const input = seedSchema.parse(await parseJson(request));
     const existing = await this.getMeta();
-    if (existing) return jsonResponse(existing);
+    if (existing) return Response.json(existing);
 
     const meta: MatchMeta = {
       matchId: input.matchId,
@@ -137,7 +138,7 @@ export class Match extends DurableObject {
     ]);
 
     await this.state.storage.put('meta', meta);
-    return jsonResponse(meta);
+    return Response.json(meta);
   }
 
   private async handleReady(request: Request): Promise<Response> {
@@ -169,7 +170,7 @@ export class Match extends DurableObject {
       await this.broadcastToVelocity(message);
     }
 
-    return jsonResponse({ ok: true, ...publicMatchState(meta) });
+    return Response.json({ ok: true, ...publicMatchState(meta) });
   }
 
   private async handleClaim(request: Request): Promise<Response> {
@@ -180,12 +181,12 @@ export class Match extends DurableObject {
       result = await this.claim(uuid.toLowerCase());
     });
 
-    return jsonResponse(result);
+    return Response.json(result);
   }
 
   private async handleState(): Promise<Response> {
     const meta = await this.requireMeta();
-    return jsonResponse(publicMatchState(meta));
+    return Response.json(publicMatchState(meta));
   }
 
   private async claim(uuid: string): Promise<unknown> {
@@ -198,7 +199,9 @@ export class Match extends DurableObject {
     }
 
     if (meta.winnerUuid) return { winner: meta.winnerUuid, youWon: meta.winnerUuid === uuid, alreadyDecided: true };
-    if (!meta.players.some((player) => player.uuid === uuid)) throw new HttpError(403, 'Claimant is not in this match');
+    if (!meta.players.some((player) => player.uuid === uuid)) {
+      throw new HTTPException(403, { message: 'Claimant is not in this match' });
+    }
 
     const endedAt = nowSeconds();
     const outcomes = calculateOneVOneElo(meta.players, uuid);
@@ -267,7 +270,7 @@ export class Match extends DurableObject {
 
   private async requireMeta(): Promise<MatchMeta> {
     const meta = await this.getMeta();
-    if (!meta) throw new HttpError(404, 'Match not found');
+    if (!meta) throw new HTTPException(404, { message: 'Match not found' });
     return meta;
   }
 
@@ -315,4 +318,16 @@ function publicMatchState(meta: MatchMeta): Record<string, unknown> {
 
 function playerTag(uuid: string): string {
   return `player:${uuid.toLowerCase()}`;
+}
+
+function errorResponse(status: number, message: string): Response {
+  return Response.json({ error: message }, { status });
+}
+
+async function parseJson<T>(request: Request): Promise<T> {
+  try {
+    return (await request.json()) as T;
+  } catch {
+    throw new HTTPException(400, { message: 'Invalid JSON body' });
+  }
 }

@@ -1,40 +1,40 @@
 import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { finishMicrosoftAuth, startMicrosoftAuth } from './auth';
 import { getLeaderboard, getProfile, getUser } from './db';
 import type { AuthenticatedUser, RirEnv, RouteEntry } from './env';
 import { routeKey, VELOCITY_HUB_NAME } from './env';
-import { errorResponse, HttpError, isServiceAuthorized, jsonResponse } from './http';
+import { isServiceAuthorized } from './http';
 import { bracketForElo, Queue } from './queue';
 import { Match } from './match';
-import { clearCookie, readSession, SESSION_COOKIE } from './session';
+import { clearSessionCookie, readSession, type RirContext } from './session';
 
 export { Match, Queue };
 
 const app = new Hono<{ Bindings: RirEnv }>();
 
 app.onError((error, c) => {
-  if (error instanceof HttpError) return errorResponse(error.status, error.message);
+  if (error instanceof HTTPException) return c.json({ error: error.message }, error.status);
   return c.json({ error: error instanceof Error ? error.message : 'Internal error' }, 500);
 });
 
-app.post('/api/auth/microsoft/start', (c) => startMicrosoftAuth(c.req.raw, c.env));
+app.post('/api/auth/microsoft/start', (c) => startMicrosoftAuth(c));
 
-app.get('/api/auth/microsoft/callback', (c) => finishMicrosoftAuth(c.req.raw, c.env));
+app.get('/api/auth/microsoft/callback', (c) => finishMicrosoftAuth(c));
 
 app.post('/api/auth/logout', (c) => {
-  const response = jsonResponse({ ok: true });
-  response.headers.append('set-cookie', clearCookie(SESSION_COOKIE));
-  return response;
+  clearSessionCookie(c);
+  return c.json({ ok: true });
 });
 
 app.get('/api/me', async (c) => {
-  const user = await currentUser(c.req.raw, c.env);
+  const user = await currentUser(c);
   if (!user) return c.json({ error: 'Unauthorized' }, 401);
   return c.json({ user });
 });
 
 app.get('/api/queue/join', async (c) => {
-  const user = await requireUser(c.req.raw, c.env);
+  const user = await requireUser(c);
   const bracket = bracketForElo(user.elo);
   const headers = forwardedHeaders(c.req.raw);
   headers.set('x-rir-user', JSON.stringify({ uuid: user.uuid, name: user.name, elo: user.elo }));
@@ -43,7 +43,7 @@ app.get('/api/queue/join', async (c) => {
 });
 
 app.get('/api/match/:matchId/ws', async (c) => {
-  const user = await requireUser(c.req.raw, c.env);
+  const user = await requireUser(c);
   const headers = forwardedHeaders(c.req.raw);
   headers.set('x-rir-user', JSON.stringify({ uuid: user.uuid }));
   return c.env.MATCH.getByName(c.req.param('matchId')).fetch('https://match.internal/ws', { method: 'GET', headers });
@@ -97,21 +97,21 @@ app.get('/api/profile/:uuid', async (c) => {
   return c.json({ profile });
 });
 
-app.notFound(() => errorResponse(404, 'Not found'));
+app.notFound((c) => c.json({ error: 'Not found' }, 404));
 
 export default {
   fetch: app.fetch,
 } satisfies ExportedHandler<RirEnv>;
 
-async function currentUser(request: Request, env: RirEnv): Promise<AuthenticatedUser | null> {
-  const session = await readSession(request, env);
+async function currentUser(c: RirContext): Promise<AuthenticatedUser | null> {
+  const session = await readSession(c);
   if (!session) return null;
-  return getUser(env.DB, session.uuid);
+  return getUser(c.env.DB, session.uuid);
 }
 
-async function requireUser(request: Request, env: RirEnv): Promise<AuthenticatedUser> {
-  const user = await currentUser(request, env);
-  if (!user) throw new HttpError(401, 'Unauthorized');
+async function requireUser(c: RirContext): Promise<AuthenticatedUser> {
+  const user = await currentUser(c);
+  if (!user) throw new HTTPException(401, { message: 'Unauthorized' });
   return user;
 }
 

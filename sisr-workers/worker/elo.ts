@@ -1,3 +1,4 @@
+import EloRating from 'elo-rating';
 import type { MatchPlayer } from './env';
 
 const K_FACTOR = 24;
@@ -15,29 +16,26 @@ export function calculateOneVOneElo(players: MatchPlayer[], winnerUuid: string):
   }
 
   const [a, b] = players;
-  const expectedA = 1 / (1 + 10 ** ((b.eloBefore - a.eloBefore) / 400));
-  const expectedB = 1 - expectedA;
-  const scoreA = a.uuid === winnerUuid ? 1 : 0;
-  const scoreB = b.uuid === winnerUuid ? 1 : 0;
-  const afterA = roundRating(a.eloBefore + K_FACTOR * (scoreA - expectedA));
-  const afterB = roundRating(b.eloBefore + K_FACTOR * (scoreB - expectedB));
+  const playerAWon = a.uuid === winnerUuid;
+  const { playerRating: afterA, opponentRating: afterB } = EloRating.calculate(
+    a.eloBefore,
+    b.eloBefore,
+    playerAWon,
+    K_FACTOR,
+  );
 
   return {
     [a.uuid]: {
       before: a.eloBefore,
       after: afterA,
-      delta: roundRating(afterA - a.eloBefore),
-      placement: scoreA === 1 ? 1 : 2,
+      delta: afterA - a.eloBefore,
+      placement: playerAWon ? 1 : 2,
     },
     [b.uuid]: {
       before: b.eloBefore,
       after: afterB,
-      delta: roundRating(afterB - b.eloBefore),
-      placement: scoreB === 1 ? 1 : 2,
+      delta: afterB - b.eloBefore,
+      placement: playerAWon ? 2 : 1,
     },
   };
-}
-
-function roundRating(value: number): number {
-  return Math.round(value * 100) / 100;
 }

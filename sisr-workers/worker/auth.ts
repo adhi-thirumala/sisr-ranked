@@ -1,20 +1,15 @@
+import { generateCodeVerifier, generateState, MicrosoftEntraId } from 'arctic';
 import { z } from 'zod';
 import type { RirEnv } from './env';
-import { jsonResponse } from './http';
 import {
-  clearCookie,
-  getCookie,
-  oauthStateCookie,
-  OAUTH_STATE_COOKIE,
-  randomBase64Url,
-  readSignedCookieValue,
-  sessionCookie,
-  sha256Base64Url,
-  type OAuthStatePayload,
+  clearOAuthStateCookie,
+  readOAuthStateCookie,
+  setOAuthStateCookie,
+  setSessionCookie,
+  type RirContext,
 } from './session';
 import { upsertUser } from './db';
 
-const msTokenSchema = z.object({ access_token: z.string() });
 const xblTokenSchema = z.object({
   Token: z.string(),
   DisplayClaims: z.object({ xui: z.array(z.object({ uhs: z.string() })).min(1) }),
@@ -22,43 +17,30 @@ const xblTokenSchema = z.object({
 const minecraftLoginSchema = z.object({ access_token: z.string() });
 const minecraftProfileSchema = z.object({ id: z.string(), name: z.string() });
 
-export async function startMicrosoftAuth(request: Request, env: RirEnv): Promise<Response> {
-  const state = randomBase64Url(24);
-  const codeVerifier = randomBase64Url(64);
-  const codeChallenge = await sha256Base64Url(codeVerifier);
-  const redirectUri = oauthRedirectUri(request, env);
-  const url = new URL('https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize');
-  url.searchParams.set('client_id', env.MS_CLIENT_ID);
-  url.searchParams.set('response_type', 'code');
-  url.searchParams.set('redirect_uri', redirectUri);
-  url.searchParams.set('scope', 'XboxLive.signin');
-  url.searchParams.set('state', state);
-  url.searchParams.set('code_challenge', codeChallenge);
-  url.searchParams.set('code_challenge_method', 'S256');
+export async function startMicrosoftAuth(c: RirContext): Promise<Response> {
+  const state = generateState();
+  const codeVerifier = generateCodeVerifier();
+  const url = microsoftEntraId(c.req.raw, c.env).createAuthorizationURL(state, codeVerifier, ['XboxLive.signin']);
   url.searchParams.set('response_mode', 'query');
 
-  const response = jsonResponse({ url: url.toString() });
-  response.headers.append('set-cookie', await oauthStateCookie(request, env, state, codeVerifier));
-  return response;
+  await setOAuthStateCookie(c, state, codeVerifier);
+  return c.json({ url: url.toString() });
 }
 
-export async function finishMicrosoftAuth(request: Request, env: RirEnv): Promise<Response> {
-  const url = new URL(request.url);
+export async function finishMicrosoftAuth(c: RirContext): Promise<Response> {
+  const url = new URL(c.req.url);
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
   const error = url.searchParams.get('error_description') ?? url.searchParams.get('error');
-  if (error) return redirectWithError(request, error);
-  if (!code || !state) return redirectWithError(request, 'Missing OAuth callback parameters');
+  if (error) return redirectWithError(c, error);
+  if (!code || !state) return redirectWithError(c, 'Missing OAuth callback parameters');
 
-  const storedState = await readSignedCookieValue<OAuthStatePayload>(
-    env.SESSION_SECRET,
-    getCookie(request, OAUTH_STATE_COOKIE),
-  );
+  const storedState = await readOAuthStateCookie(c);
   if (!storedState || storedState.state !== state || Date.now() - storedState.issuedAt > 10 * 60 * 1000) {
-    return redirectWithError(request, 'OAuth state expired or did not match');
+    return redirectWithError(c, 'OAuth state expired or did not match');
   }
 
-  const msAccessToken = await exchangeMicrosoftCode(request, env, code, storedState.codeVerifier);
+  const msAccessToken = await exchangeMicrosoftCode(c.req.raw, c.env, code, storedState.codeVerifier);
   const xbl = await authenticateXboxLive(msAccessToken);
   const xsts = await authorizeXsts(xbl.Token);
   const userHash = xsts.DisplayClaims.xui[0].uhs;
@@ -66,16 +48,19 @@ export async function finishMicrosoftAuth(request: Request, env: RirEnv): Promis
   const profile = await fetchMinecraftProfile(minecraftAccessToken);
   const uuid = hyphenateMinecraftUuid(profile.id);
 
-  await upsertUser(env.DB, uuid, profile.name);
+  await upsertUser(c.env.DB, uuid, profile.name);
 
-  const response = Response.redirect(`${new URL(request.url).origin}/queue`, 302);
-  response.headers.append('set-cookie', await sessionCookie(request, env, uuid));
-  response.headers.append('set-cookie', clearCookie(OAUTH_STATE_COOKIE));
-  return response;
+  await setSessionCookie(c, uuid);
+  clearOAuthStateCookie(c);
+  return c.redirect(`${new URL(c.req.url).origin}/queue`, 302);
 }
 
 function oauthRedirectUri(request: Request, env: RirEnv): string {
   return env.OAUTH_REDIRECT_URI || `${new URL(request.url).origin}/api/auth/microsoft/callback`;
+}
+
+function microsoftEntraId(request: Request, env: RirEnv): MicrosoftEntraId {
+  return new MicrosoftEntraId('consumers', env.MS_CLIENT_ID, env.MS_CLIENT_SECRET, oauthRedirectUri(request, env));
 }
 
 async function exchangeMicrosoftCode(
@@ -84,24 +69,8 @@ async function exchangeMicrosoftCode(
   code: string,
   codeVerifier: string,
 ): Promise<string> {
-  const body = new URLSearchParams({
-    client_id: env.MS_CLIENT_ID,
-    scope: 'XboxLive.signin',
-    code,
-    redirect_uri: oauthRedirectUri(request, env),
-    grant_type: 'authorization_code',
-    code_verifier: codeVerifier,
-  });
-  if (env.MS_CLIENT_SECRET) body.set('client_secret', env.MS_CLIENT_SECRET);
-
-  const response = await fetch('https://login.microsoftonline.com/consumers/oauth2/v2.0/token', {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body,
-  });
-
-  const json = await parseOAuthResponse(response, 'Microsoft token exchange failed');
-  return msTokenSchema.parse(json).access_token;
+  const tokens = await microsoftEntraId(request, env).validateAuthorizationCode(code, codeVerifier);
+  return tokens.accessToken();
 }
 
 async function authenticateXboxLive(msAccessToken: string): Promise<z.infer<typeof xblTokenSchema>> {
@@ -189,10 +158,9 @@ function hyphenateMinecraftUuid(value: string): string {
   return `${normalized.slice(0, 8)}-${normalized.slice(8, 12)}-${normalized.slice(12, 16)}-${normalized.slice(16, 20)}-${normalized.slice(20)}`;
 }
 
-function redirectWithError(request: Request, message: string): Response {
-  const url = new URL('/login', new URL(request.url).origin);
+function redirectWithError(c: RirContext, message: string): Response {
+  const url = new URL('/login', new URL(c.req.url).origin);
   url.searchParams.set('error', message);
-  const response = Response.redirect(url.toString(), 302);
-  response.headers.append('set-cookie', clearCookie(OAUTH_STATE_COOKIE));
-  return response;
+  clearOAuthStateCookie(c);
+  return c.redirect(url.toString(), 302);
 }
