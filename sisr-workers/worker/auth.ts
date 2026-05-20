@@ -15,16 +15,20 @@ const xblTokenSchema = z.object({
   Token: z.string(),
   DisplayClaims: z.object({ xui: z.array(z.object({ uhs: z.string() })).min(1) }),
 });
+const microsoftTokenSchema = z.object({ access_token: z.string() });
 const minecraftLoginSchema = z.object({ access_token: z.string() });
 const minecraftProfileSchema = z.object({ id: z.string(), name: z.string() });
+const MICROSOFT_TENANT = 'consumers';
 
 export async function startMicrosoftAuth(c: RirContext): Promise<Response> {
   const state = generateState();
   const codeVerifier = generateCodeVerifier();
+  const redirectTo = await authRedirectPath(c);
   const url = microsoftEntraId(c.req.raw, c.env).createAuthorizationURL(state, codeVerifier, ['XboxLive.signin']);
   url.searchParams.set('response_mode', 'query');
 
-  await setOAuthStateCookie(c, state, codeVerifier);
+  await setOAuthStateCookie(c, state, codeVerifier, redirectTo);
+  logAuthStep('start', { redirectTo: redirectTo ?? '/queue', redirectUri: oauthRedirectUri(c.req.raw, c.env) });
   return c.json({ url: url.toString() });
 }
 
@@ -35,25 +39,46 @@ export async function finishMicrosoftAuth(c: RirContext): Promise<Response> {
   const error = url.searchParams.get('error_description') ?? url.searchParams.get('error');
   if (error) return redirectWithError(c, error);
   if (!code || !state) return redirectWithError(c, 'Missing OAuth callback parameters');
+  logAuthStep('callback_received');
 
   const storedState = await readOAuthStateCookie(c);
   if (!storedState || storedState.state !== state || Date.now() - storedState.issuedAt > 10 * 60 * 1000) {
     return redirectWithError(c, 'OAuth state expired or did not match');
   }
+  logAuthStep('state_validated', { ageMs: Date.now() - storedState.issuedAt });
 
-  const msAccessToken = await exchangeMicrosoftCode(c.req.raw, c.env, code, storedState.codeVerifier);
-  const xbl = await authenticateXboxLive(msAccessToken);
-  const xsts = await authorizeXsts(xbl.Token);
-  const userHash = xsts.DisplayClaims.xui[0].uhs;
-  const minecraftAccessToken = await loginWithMinecraft(userHash, xsts.Token);
-  const profile = await fetchMinecraftProfile(minecraftAccessToken);
-  const uuid = parseMinecraftUuid(profile.id);
+  try {
+    const msAccessToken = await exchangeMicrosoftCode(c.req.raw, c.env, code, storedState.codeVerifier);
+    logAuthStep('microsoft_token_exchanged');
+    const xbl = await authenticateXboxLive(msAccessToken);
+    logAuthStep('xbox_live_authenticated');
+    const xsts = await authorizeXsts(xbl.Token);
+    logAuthStep('xsts_authorized');
+    const userHash = xsts.DisplayClaims.xui[0].uhs;
+    const minecraftAccessToken = await loginWithMinecraft(userHash, xsts.Token);
+    logAuthStep('minecraft_token_acquired');
+    const profile = await fetchMinecraftProfile(minecraftAccessToken);
+    logAuthStep('minecraft_profile_fetched', { uuid: profile.id, name: profile.name });
+    const uuid = parseMinecraftUuid(profile.id);
 
-  await upsertUser(c.env.DB, uuid, profile.name);
+    await upsertUser(c.env.DB, uuid, profile.name);
+    logAuthStep('user_upserted', { uuid, name: profile.name });
 
-  await setSessionCookie(c, uuid);
-  clearOAuthStateCookie(c);
-  return c.redirect(`${new URL(c.req.url).origin}/queue`, 302);
+    await setSessionCookie(c, uuid);
+    clearOAuthStateCookie(c);
+    logAuthStep('session_created', { uuid, redirectTo: storedState.redirectTo ?? '/queue' });
+    return c.redirect(`${new URL(c.req.url).origin}${storedState.redirectTo ?? '/queue'}`, 302);
+  } catch (error) {
+    console.error('Microsoft auth callback failed', error);
+    return redirectWithError(c, 'Authentication failed. Please try again.');
+  }
+}
+
+async function authRedirectPath(c: RirContext): Promise<string | undefined> {
+  const body = await c.req.json<{ redirectTo?: unknown }>().catch(() => null);
+  if (!body || typeof body.redirectTo !== 'string') return undefined;
+  if (!body.redirectTo.startsWith('/') || body.redirectTo.startsWith('//')) return undefined;
+  return body.redirectTo;
 }
 
 function oauthRedirectUri(request: Request, env: RirEnv): string {
@@ -61,7 +86,7 @@ function oauthRedirectUri(request: Request, env: RirEnv): string {
 }
 
 function microsoftEntraId(request: Request, env: RirEnv): MicrosoftEntraId {
-  return new MicrosoftEntraId('consumers', env.MS_CLIENT_ID, env.MS_CLIENT_SECRET, oauthRedirectUri(request, env));
+  return new MicrosoftEntraId(MICROSOFT_TENANT, env.MS_CLIENT_ID, null, oauthRedirectUri(request, env));
 }
 
 async function exchangeMicrosoftCode(
@@ -70,8 +95,22 @@ async function exchangeMicrosoftCode(
   code: string,
   codeVerifier: string,
 ): Promise<string> {
-  const tokens = await microsoftEntraId(request, env).validateAuthorizationCode(code, codeVerifier);
-  return tokens.accessToken();
+  const redirectUri = oauthRedirectUri(request, env);
+  const response = await fetch(`https://login.microsoftonline.com/${MICROSOFT_TENANT}/oauth2/v2.0/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: env.MS_CLIENT_ID,
+      code,
+      code_verifier: codeVerifier,
+      grant_type: 'authorization_code',
+      redirect_uri: redirectUri,
+      scope: 'XboxLive.signin',
+    }),
+  });
+
+  const json = await parseOAuthResponse(response, 'Microsoft token exchange failed');
+  return microsoftTokenSchema.parse(json).access_token;
 }
 
 async function authenticateXboxLive(msAccessToken: string): Promise<z.infer<typeof xblTokenSchema>> {
@@ -166,4 +205,8 @@ function redirectWithError(c: RirContext, message: string): Response {
   url.searchParams.set('error', message);
   clearOAuthStateCookie(c);
   return c.redirect(url.toString(), 302);
+}
+
+function logAuthStep(step: string, details?: Record<string, unknown>): void {
+  console.log('Microsoft auth step', { step, ...details });
 }

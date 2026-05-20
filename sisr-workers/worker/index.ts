@@ -15,7 +15,8 @@ const app = new Hono<{ Bindings: RirEnv }>();
 
 app.onError((error, c) => {
   if (error instanceof HTTPException) return c.json({ error: error.message }, error.status);
-  return c.json({ error: error instanceof Error ? error.message : 'Internal error' }, 500);
+  console.error('Unhandled request error', error);
+  return c.json({ error: 'Internal error' }, 500);
 });
 
 app.post('/api/auth/microsoft/start', (c) => startMicrosoftAuth(c));
@@ -31,6 +32,11 @@ app.get('/api/me', async (c) => {
   const user = await currentUser(c);
   if (!user) return c.json({ error: 'Unauthorized' }, 401);
   return c.json({ user });
+});
+
+app.get('/api/auth/test', async (c) => {
+  const user = await requireUser(c);
+  return c.json({ message: `Signed in as ${user.name}`, user });
 });
 
 app.get('/api/queue/join', async (c) => {

@@ -10,7 +10,7 @@ export interface RirEnv {
   AGENT_BASE_URL: string;
   OAUTH_REDIRECT_URI?: string;
   MS_CLIENT_ID: string;
-  MS_CLIENT_SECRET: string;
+  MS_CLIENT_SECRET?: string;
   SESSION_SECRET: string;
   AGENT_SERVICE_TOKEN: string;
   SERVICE_API_TOKEN?: string;

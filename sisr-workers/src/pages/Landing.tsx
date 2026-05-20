@@ -40,6 +40,27 @@ const leaderboard = [
 
 export default function Landing() {
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isSigningIn, setIsSigningIn] = useState(false);
+
+  async function signIn() {
+    try {
+      setAuthError(null);
+      setIsSigningIn(true);
+      const response = await fetch('/api/auth/microsoft/start', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ redirectTo: '/queue' }),
+      });
+      if (!response.ok) throw new Error('Failed to start Microsoft sign in');
+
+      const data = (await response.json()) as { url: string };
+      window.location.assign(data.url);
+    } catch (error) {
+      setIsSigningIn(false);
+      setAuthError(error instanceof Error ? error.message : 'Failed to start Microsoft sign in');
+    }
+  }
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -73,8 +94,8 @@ export default function Landing() {
         </div>
         <div className="hidden items-center gap-6 text-sm text-muted-foreground sm:flex">
           <span>Leaderboard</span>
-          <Button size="sm" className="gap-1.5">
-            Sign In <HugeiconsIcon icon={ArrowRight01Icon} size={16} />
+          <Button size="sm" className="gap-1.5" disabled={isSigningIn} onClick={() => void signIn()}>
+            {isSigningIn ? 'Signing In...' : 'Sign In'} <HugeiconsIcon icon={ArrowRight01Icon} size={16} />
           </Button>
         </div>
       </nav>
@@ -97,14 +118,15 @@ export default function Landing() {
         </p>
 
         <div className="mt-10 flex flex-col gap-4 sm:flex-row">
-          <Button size="lg" className="gap-2 px-8 text-base">
-            Start Racing
+          <Button size="lg" className="gap-2 px-8 text-base" disabled={isSigningIn} onClick={() => void signIn()}>
+            {isSigningIn ? 'Signing In...' : 'Start Racing'}
             <HugeiconsIcon icon={ArrowRight01Icon} size={18} />
           </Button>
           <Button size="lg" variant="outline" className="gap-2 px-8 text-base">
             View Leaderboard
           </Button>
         </div>
+        {authError ? <p className="mt-4 text-sm text-destructive">{authError}</p> : null}
 
         {/* Scroll indicator */}
         <div className="mt-20 animate-bounce">
@@ -205,8 +227,8 @@ export default function Landing() {
         <p className="mx-auto mt-4 max-w-lg text-muted-foreground">
           Sign in with your Microsoft account and jump into the queue. Your first match starts in seconds.
         </p>
-        <Button size="lg" className="mt-8 gap-2 px-8 text-base">
-          Get Started
+        <Button size="lg" className="mt-8 gap-2 px-8 text-base" disabled={isSigningIn} onClick={() => void signIn()}>
+          {isSigningIn ? 'Signing In...' : 'Get Started'}
           <HugeiconsIcon icon={ArrowRight01Icon} size={18} />
         </Button>
       </section>

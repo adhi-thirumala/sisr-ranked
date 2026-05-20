@@ -16,6 +16,7 @@ export interface OAuthStatePayload {
   state: string;
   codeVerifier: string;
   issuedAt: number;
+  redirectTo?: string;
 }
 
 export async function readSession(c: RirContext): Promise<SessionPayload | null> {
@@ -33,11 +34,12 @@ export async function readOAuthStateCookie(c: RirContext): Promise<OAuthStatePay
   return readSignedPayload<OAuthStatePayload>(c, OAUTH_STATE_COOKIE);
 }
 
-export async function setOAuthStateCookie(c: RirContext, state: string, codeVerifier: string): Promise<void> {
+export async function setOAuthStateCookie(c: RirContext, state: string, codeVerifier: string, redirectTo?: string): Promise<void> {
   await setSignedPayload(c, OAUTH_STATE_COOKIE, {
     state,
     codeVerifier,
     issuedAt: Date.now(),
+    redirectTo,
   } satisfies OAuthStatePayload, 10 * 60);
 }
 
