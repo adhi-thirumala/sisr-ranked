@@ -5,7 +5,7 @@ import type { RirEnv } from './env';
 export const SESSION_COOKIE = 'rir_session';
 export const OAUTH_STATE_COOKIE = 'rir_oauth_state';
 
-export type RirContext = Context<{ Bindings: RirEnv }>;
+export type RirContext = Context<{ Bindings: RirEnv; Variables: { requestId: string } }>;
 
 export interface SessionPayload {
   uuid: string;

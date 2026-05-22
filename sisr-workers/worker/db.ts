@@ -1,6 +1,7 @@
 import type { AuthenticatedUser, RirEnv } from './env';
 import { LEADERBOARD_CACHE_KEY } from './env';
 import { nowSeconds } from './http';
+import { logInfo, shortId } from './logging';
 import { tryUuidToBlob, uuidFromBlob, uuidToBlob } from './uuid';
 
 interface UserRecord {
@@ -27,6 +28,8 @@ export interface LeaderboardEntry {
   wins: number;
 }
 
+const LEADERBOARD_CACHE_TTL_SECONDS = 60;
+
 export function mapUser(row: UserRecord): AuthenticatedUser {
   return {
     uuid: uuidFromBlob(row.mc_uuid),
@@ -45,7 +48,9 @@ export async function getUser(db: D1Database, uuid: string): Promise<Authenticat
     .prepare('SELECT mc_uuid, mc_name, elo, matches, wins FROM users WHERE mc_uuid = ?')
     .bind(uuidBlob)
     .first<UserRecord>();
-  return row ? mapUser(row) : null;
+  const user = row ? mapUser(row) : null;
+  logInfo('db.user.lookup', { user: shortId(uuid), found: Boolean(user) });
+  return user;
 }
 
 export async function upsertUser(db: D1Database, uuid: string, name: string): Promise<void> {
@@ -57,23 +62,28 @@ export async function upsertUser(db: D1Database, uuid: string, name: string): Pr
     )
     .bind(uuidToBlob(uuid), name, nowSeconds())
     .run();
+  logInfo('db.user.upserted', { user: shortId(uuid), name });
 }
 
 export async function getLeaderboard(env: RirEnv): Promise<LeaderboardEntry[]> {
   const cached = await env.CACHE.get(LEADERBOARD_CACHE_KEY);
-  if (cached) return JSON.parse(cached) as LeaderboardEntry[];
+  if (cached) {
+    logInfo('db.leaderboard.cache_hit');
+    return JSON.parse(cached) as LeaderboardEntry[];
+  }
 
-  const result = await env.DB
-    .prepare(
-      `SELECT mc_uuid AS uuid, mc_name AS name, elo, matches, wins
+  logInfo('db.leaderboard.cache_miss');
+
+  const result = await env.DB.prepare(
+    `SELECT mc_uuid AS uuid, mc_name AS name, elo, matches, wins
        FROM users
        ORDER BY elo DESC, wins DESC, matches ASC
        LIMIT 100`,
-    )
-    .all<LeaderboardRecord>();
+  ).all<LeaderboardRecord>();
 
   const entries = (result.results ?? []).map(mapLeaderboardRecord);
-  await env.CACHE.put(LEADERBOARD_CACHE_KEY, JSON.stringify(entries), { expirationTtl: 30 });
+  await env.CACHE.put(LEADERBOARD_CACHE_KEY, JSON.stringify(entries), { expirationTtl: LEADERBOARD_CACHE_TTL_SECONDS });
+  logInfo('db.leaderboard.loaded', { count: entries.length });
   return entries;
 }
 
@@ -85,7 +95,9 @@ export async function getProfile(db: D1Database, uuid: string): Promise<Leaderbo
     .prepare('SELECT mc_uuid AS uuid, mc_name AS name, elo, matches, wins FROM users WHERE mc_uuid = ?')
     .bind(uuidBlob)
     .first<LeaderboardRecord>();
-  return row ? mapLeaderboardRecord(row) : null;
+  const profile = row ? mapLeaderboardRecord(row) : null;
+  logInfo('db.profile.lookup', { user: shortId(uuid), found: Boolean(profile) });
+  return profile;
 }
 
 function mapLeaderboardRecord(row: LeaderboardRecord): LeaderboardEntry {

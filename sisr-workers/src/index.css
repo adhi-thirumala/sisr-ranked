@@ -144,6 +144,11 @@ body {
   color: var(--foreground);
 }
 
+.image-pixelated,
+.image-pixelated img {
+  image-rendering: pixelated;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
