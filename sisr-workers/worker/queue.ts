@@ -6,6 +6,7 @@ import type { MatchPlayer, QueueEntry, RirEnv } from './env';
 import { pendingKey, PENDING_TTL_SECONDS, QUEUE_WIDEN_AFTER_MS, routeKey } from './env';
 import { internalHeaders, isWebSocketUpgrade, requireInternal } from './http';
 import { chooseTargetItem } from './items';
+import { errorFields, logError, logInfo, logWarn, requestIdFrom, routePath, shortId } from './logging';
 import { normalizeUuid } from './uuid';
 
 const restoreSchema = z.object({
@@ -37,37 +38,57 @@ export class Queue extends DurableObject {
   }
 
   async fetch(request: Request): Promise<Response> {
+    const requestId = requestIdFrom(request);
+    const path = routePath(request);
+    const startedAt = Date.now();
     try {
       const url = new URL(request.url);
-      if (url.pathname === '/join' && request.method === 'GET') return this.handleJoin(request);
-      if (url.pathname === '/borrow' && request.method === 'POST') return this.handleBorrow(request);
-      if (url.pathname === '/restore' && request.method === 'POST') return this.handleRestore(request);
-      if (url.pathname === '/notify-match' && request.method === 'POST') return this.handleNotifyMatch(request);
-      return errorResponse(404, 'Not found');
+      let response: Response;
+      if (url.pathname === '/join' && request.method === 'GET') response = await this.handleJoin(request);
+      else if (url.pathname === '/borrow' && request.method === 'POST') response = await this.handleBorrow(request);
+      else if (url.pathname === '/restore' && request.method === 'POST') response = await this.handleRestore(request);
+      else if (url.pathname === '/notify-match' && request.method === 'POST') response = await this.handleNotifyMatch(request);
+      else response = errorResponse(404, 'Not found');
+
+      logInfo('queue.request.end', { requestId, path, method: request.method, status: response.status, durationMs: Date.now() - startedAt });
+      return response;
     } catch (error) {
-      if (error instanceof HTTPException) return errorResponse(error.status, error.message);
+      if (error instanceof HTTPException) {
+        logWarn('queue.request.exception', { requestId, path, method: request.method, status: error.status, errorMessage: error.message });
+        return errorResponse(error.status, error.message);
+      }
+      logError('queue.request.error', { requestId, path, method: request.method, ...errorFields(error) });
       return errorResponse(500, error instanceof Error ? error.message : 'Queue error');
     }
   }
 
   async alarm(): Promise<void> {
-    await this.state.blockConcurrencyWhile(async () => {
-      await this.tryFormLocalMatches();
-      await this.tryWidenOldestWaiter();
-      await this.scheduleNextAlarm();
-    });
+    const startedAt = Date.now();
+    try {
+      await this.state.blockConcurrencyWhile(async () => {
+        await this.tryFormLocalMatches();
+        await this.tryWidenOldestWaiter();
+        await this.scheduleNextAlarm();
+      });
+    } catch (error) {
+      logError('queue.alarm.error', { durationMs: Date.now() - startedAt, ...errorFields(error) });
+      throw error;
+    }
   }
 
-  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    if (message === 'ping') ws.send('pong');
-  }
+  async webSocketMessage(): Promise<void> {}
 
   async webSocketClose(ws: WebSocket): Promise<void> {
     const attachment = ws.deserializeAttachment() as QueueSocketAttachment | undefined;
-    if (attachment?.uuid) await this.state.storage.delete(queueKey(attachment.uuid));
+    if (attachment?.uuid) {
+      logInfo('queue.socket.close', { user: shortId(attachment.uuid) });
+      await this.state.storage.delete(queueKey(attachment.uuid));
+    }
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
+    const attachment = ws.deserializeAttachment() as QueueSocketAttachment | undefined;
+    logWarn('queue.socket.error', { user: shortId(attachment?.uuid) });
     await this.webSocketClose(ws);
   }
 
@@ -101,6 +122,7 @@ export class Queue extends DurableObject {
       };
       await this.state.storage.put(queueKey(user.uuid), entry);
       await this.sendQueuePosition(user.uuid);
+      logInfo('queue.join.accepted', { requestId: requestIdFrom(request), user: shortId(user.uuid), bracket: bracketName, elo: user.elo });
       await this.tryFormLocalMatches();
       await this.scheduleNextAlarm();
     });
@@ -110,7 +132,6 @@ export class Queue extends DurableObject {
 
   private async handleBorrow(request: Request): Promise<Response> {
     requireInternal(request);
-    const bracketName = await this.currentBracketName();
 
     return this.state.blockConcurrencyWhile(async () => {
       await this.tryFormLocalMatches();
@@ -119,7 +140,8 @@ export class Queue extends DurableObject {
 
       const [waiter] = waiters;
       await this.state.storage.delete(queueKey(waiter.uuid));
-      await this.state.storage.put('bracketName', bracketName);
+      await this.state.storage.put('bracketName', waiter.queueName);
+      logInfo('queue.borrow.granted', { requestId: requestIdFrom(request), user: shortId(waiter.uuid), queueName: waiter.queueName });
       return Response.json({ waiter });
     });
   }
@@ -132,6 +154,7 @@ export class Queue extends DurableObject {
       await this.state.storage.put(queueKey(waiter.uuid), waiter);
       await this.sendQueuePosition(waiter.uuid);
       await this.scheduleNextAlarm();
+      logInfo('queue.waiter.restored', { requestId: requestIdFrom(request), user: shortId(waiter.uuid), queueName: waiter.queueName });
     });
     return Response.json({ ok: true });
   }
@@ -149,6 +172,7 @@ export class Queue extends DurableObject {
       if (waiters.length < 2) return;
 
       const selected = waiters.slice(0, 2);
+      logInfo('queue.match.local_selected', { queueName: await this.currentBracketName(), playerCount: selected.length });
       await this.deleteWaiters(selected);
       try {
         await this.formMatch(selected);
@@ -171,6 +195,7 @@ export class Queue extends DurableObject {
       if (!borrowed) continue;
 
       const selected = [oldest, borrowed];
+      logInfo('queue.match.widened_selected', { queueName: await this.currentBracketName(), neighbor, waitedMs: Date.now() - oldest.joinedAt });
       await this.state.storage.delete(queueKey(oldest.uuid));
       try {
         await this.formMatch(selected);
@@ -190,7 +215,10 @@ export class Queue extends DurableObject {
       body: JSON.stringify({ requester: await this.currentBracketName() }),
     });
     if (response.status === 204) return null;
-    if (!response.ok) throw new Error(`Neighbor borrow failed: ${response.status}`);
+    if (!response.ok) {
+      logWarn('queue.borrow.failed', { queueName, status: response.status });
+      throw new Error(`Neighbor borrow failed: ${response.status}`);
+    }
     const payload = (await response.json()) as { waiter: QueueEntry };
     return payload.waiter;
   }
@@ -203,6 +231,7 @@ export class Queue extends DurableObject {
     let allocated = false;
 
     try {
+      logInfo('queue.match.forming', { matchId: shortId(matchId), playerCount: players.length, targetItem });
       const allocation = await allocateMatch(this.bindings, { matchId, players, targetItem, worldSeed });
       allocated = true;
       const startedAt = Math.floor(Date.now() / 1000);
@@ -247,7 +276,9 @@ export class Queue extends DurableObject {
       );
 
       await Promise.allSettled(waiters.map((waiter) => this.notifyWaiter(waiter, message)));
+      logInfo('queue.match.formed', { matchId: shortId(matchId), playerCount: waiters.length, serverAddress: allocation.address });
     } catch (error) {
+      logError('queue.match.form_failed', { matchId: shortId(matchId), playerCount: waiters.length, allocated, ...errorFields(error) });
       if (allocated) await stopMatch(this.bindings, matchId).catch(() => undefined);
       await Promise.all(players.map((uuid) => this.bindings.ROUTING.delete(routeKey(uuid))));
       throw error;
@@ -273,6 +304,7 @@ export class Queue extends DurableObject {
       socket.send(JSON.stringify(message));
       socket.close(1000, 'Match found');
     }
+    logInfo('queue.waiter.notified', { user: shortId(uuid) });
     await this.state.storage.delete(queueKey(uuid));
   }
 
@@ -315,7 +347,7 @@ export class Queue extends DurableObject {
     }
 
     const nextAt = waiters[0].joinedAt + QUEUE_WIDEN_AFTER_MS;
-    await this.state.storage.setAlarm(Math.max(Date.now() + 1_000, nextAt));
+    await this.state.storage.setAlarm(nextAt > Date.now() ? nextAt : Date.now() + 5_000);
   }
 
   private async currentBracketName(): Promise<string> {

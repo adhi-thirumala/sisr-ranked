@@ -6,6 +6,7 @@ import { calculateOneVOneElo } from './elo';
 import type { MatchMeta, RirEnv, RouteEntry } from './env';
 import { LEADERBOARD_CACHE_KEY, routeKey, ROUTE_TTL_SECONDS, VELOCITY_HUB_NAME } from './env';
 import { internalHeaders, isWebSocketUpgrade, nowSeconds, requireInternal } from './http';
+import { errorFields, logError, logInfo, logWarn, requestIdFrom, routePath, shortId } from './logging';
 import { normalizeUuid, uuidFromBlob, uuidToBlob } from './uuid';
 
 const playerSchema = z.object({
@@ -47,29 +48,41 @@ export class Match extends DurableObject {
   }
 
   async fetch(request: Request): Promise<Response> {
+    const requestId = requestIdFrom(request);
+    const path = routePath(request);
+    const startedAt = Date.now();
     try {
       const url = new URL(request.url);
-      if (url.pathname === '/ws' && request.method === 'GET') return this.handlePlayerSocket(request);
-      if (url.pathname === '/velocity/events' && request.method === 'GET') return this.handleVelocitySocket(request);
-      if (url.pathname === '/internal/broadcast' && request.method === 'POST') return this.handleHubBroadcast(request);
-      if (url.pathname === '/internal/seed' && request.method === 'POST') return this.handleSeed(request);
-      if (url.pathname === '/ready' && request.method === 'POST') return this.handleReady(request);
-      if (url.pathname === '/claim' && request.method === 'POST') return this.handleClaim(request);
-      if (url.pathname === '/state' && request.method === 'GET') return this.handleState();
-      return errorResponse(404, 'Not found');
+      let response: Response;
+      if (url.pathname === '/ws' && request.method === 'GET') response = await this.handlePlayerSocket(request);
+      else if (url.pathname === '/velocity/events' && request.method === 'GET') response = await this.handleVelocitySocket(request);
+      else if (url.pathname === '/internal/broadcast' && request.method === 'POST') response = await this.handleHubBroadcast(request);
+      else if (url.pathname === '/internal/seed' && request.method === 'POST') response = await this.handleSeed(request);
+      else if (url.pathname === '/ready' && request.method === 'POST') response = await this.handleReady(request);
+      else if (url.pathname === '/claim' && request.method === 'POST') response = await this.handleClaim(request);
+      else if (url.pathname === '/state' && request.method === 'GET') response = await this.handleState();
+      else response = errorResponse(404, 'Not found');
+
+      logInfo('match.request.end', { requestId, path, method: request.method, status: response.status, durationMs: Date.now() - startedAt });
+      return response;
     } catch (error) {
-      if (error instanceof HTTPException) return errorResponse(error.status, error.message);
+      if (error instanceof HTTPException) {
+        logWarn('match.request.exception', { requestId, path, method: request.method, status: error.status, errorMessage: error.message });
+        return errorResponse(error.status, error.message);
+      }
+      logError('match.request.error', { requestId, path, method: request.method, ...errorFields(error) });
       return errorResponse(500, error instanceof Error ? error.message : 'Match error');
     }
   }
 
-  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    if (message === 'ping') ws.send('pong');
-  }
+  async webSocketMessage(): Promise<void> {}
 
   async webSocketClose(): Promise<void> {}
 
-  async webSocketError(): Promise<void> {}
+  async webSocketError(ws: WebSocket): Promise<void> {
+    const attachment = ws.deserializeAttachment() as MatchSocketAttachment | undefined;
+    logWarn('match.socket.error', { kind: attachment?.kind, user: shortId(attachment?.uuid) });
+  }
 
   private async handlePlayerSocket(request: Request): Promise<Response> {
     if (!isWebSocketUpgrade(request)) return errorResponse(426, 'Expected WebSocket upgrade');
@@ -86,6 +99,7 @@ export class Match extends DurableObject {
     server.serializeAttachment({ kind: isPlayer ? 'player' : 'spectator', uuid: user.uuid } satisfies MatchSocketAttachment);
     this.state.acceptWebSocket(server, [isPlayer ? playerTag(user.uuid) : 'spectator']);
     if (meta) server.send(JSON.stringify({ type: 'match_state', ...publicMatchState(meta) }));
+    logInfo('match.player_socket.accepted', { requestId: requestIdFrom(request), matchId: shortId(meta?.matchId), user: shortId(user.uuid), kind: isPlayer ? 'player' : 'spectator' });
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -99,6 +113,7 @@ export class Match extends DurableObject {
     server.serializeAttachment({ kind: 'velocity' } satisfies MatchSocketAttachment);
     this.state.acceptWebSocket(server, ['velocity']);
     server.send(JSON.stringify({ type: 'velocity_connected' }));
+    logInfo('match.velocity_socket.accepted', { requestId: requestIdFrom(request) });
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -106,6 +121,7 @@ export class Match extends DurableObject {
     requireInternal(request);
     const message = await parseJson(request);
     this.broadcastToTag('velocity', message);
+    logInfo('match.velocity.broadcast', { requestId: requestIdFrom(request) });
     return Response.json({ ok: true });
   }
 
@@ -114,7 +130,10 @@ export class Match extends DurableObject {
     const input = seedSchema.parse(await parseJson(request));
     const players = input.players.map((player) => ({ ...player, uuid: normalizeUuid(player.uuid) }));
     const existing = await this.getMeta();
-    if (existing) return Response.json(existing);
+    if (existing) {
+      logInfo('match.seed.idempotent', { requestId: requestIdFrom(request), matchId: shortId(existing.matchId) });
+      return Response.json(existing);
+    }
 
     const meta: MatchMeta = {
       matchId: input.matchId,
@@ -141,6 +160,7 @@ export class Match extends DurableObject {
     ]);
 
     await this.state.storage.put('meta', meta);
+    logInfo('match.seeded', { requestId: requestIdFrom(request), matchId: shortId(meta.matchId), playerCount: meta.players.length, targetItem: meta.targetItem, serverName: meta.serverName });
     return Response.json(meta);
   }
 
@@ -171,6 +191,7 @@ export class Match extends DurableObject {
       };
       this.broadcastToPlayers(meta, message);
       await this.broadcastToVelocity(message);
+      logInfo('match.ready', { requestId: requestIdFrom(request), matchId: shortId(meta.matchId), serverAddress: meta.serverAddress });
     }
 
     return Response.json({ ok: true, ...publicMatchState(meta) });
@@ -183,6 +204,8 @@ export class Match extends DurableObject {
     await this.state.blockConcurrencyWhile(async () => {
       result = await this.claim(normalizeUuid(uuid));
     });
+
+    logInfo('match.claim.handled', { requestId: requestIdFrom(request), claimant: shortId(uuid) });
 
     return Response.json(result);
   }
@@ -198,10 +221,14 @@ export class Match extends DurableObject {
     if (canonicalWinner) {
       meta.winnerUuid = canonicalWinner;
       await this.state.storage.put('meta', meta);
+      logInfo('match.claim.already_persisted', { matchId: shortId(meta.matchId), winner: shortId(canonicalWinner), claimant: shortId(uuid) });
       return { winner: canonicalWinner, youWon: canonicalWinner === uuid, alreadyDecided: true };
     }
 
-    if (meta.winnerUuid) return { winner: meta.winnerUuid, youWon: meta.winnerUuid === uuid, alreadyDecided: true };
+    if (meta.winnerUuid) {
+      logInfo('match.claim.already_decided', { matchId: shortId(meta.matchId), winner: shortId(meta.winnerUuid), claimant: shortId(uuid) });
+      return { winner: meta.winnerUuid, youWon: meta.winnerUuid === uuid, alreadyDecided: true };
+    }
     if (!meta.players.some((player) => player.uuid === uuid)) {
       throw new HTTPException(403, { message: 'Claimant is not in this match' });
     }
@@ -264,6 +291,8 @@ export class Match extends DurableObject {
     this.broadcastToPlayers(meta, message);
     await this.broadcastToVelocity(message);
     this.state.waitUntil(stopMatch(this.bindings, meta.matchId).catch(() => undefined));
+
+    logInfo('match.claim.winner_set', { matchId: shortId(meta.matchId), winner: shortId(uuid), playerCount: meta.players.length });
 
     return { winner: uuid, youWon: true, eloChanges: meta.eloChanges };
   }
