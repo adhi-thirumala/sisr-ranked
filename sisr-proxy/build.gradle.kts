@@ -1,3 +1,4 @@
+import java.net.URI
 import java.util.Locale
 
 plugins {
@@ -72,23 +73,25 @@ tasks {
         group = "velocity"
         description = "Downloads the Velocity proxy server jar."
         val dest = downloadedVelocityJar.get().asFile
+        val url = velocityDownloadUrl
         outputs.file(dest)
 
         doLast {
             if (!dest.exists()) {
                 dest.parentFile.mkdirs()
-                try {
-                    ant.invokeMethod("get", mapOf(
-                        "src" to velocityDownloadUrl,
-                        "dest" to dest,
-                        "verbose" to true,
-                    ))
-                } catch (_: Exception) {
-                    val body = dest.readText()
-                    if (body.startsWith("{") || body.startsWith("<")) {
-                        dest.delete()
-                        throw GradleException("Download from $velocityDownloadUrl returned an HTML/JSON error page instead of a jar")
+                URI(url).toURL().openStream().use { input ->
+                    dest.outputStream().use { output ->
+                        input.copyTo(output)
                     }
+                }
+                // Reject error pages masquerading as a jar (HTML or JSON).
+                val header = dest.inputStream().use { input ->
+                    ByteArray(2).also { input.read(it) }
+                }
+                if (header[0] != 0x50.toByte() || header[1] != 0x4B.toByte()) {
+                    val snippet = dest.readText().take(200)
+                    dest.delete()
+                    throw GradleException("Download from $url did not return a jar (got: $snippet)")
                 }
             }
         }
