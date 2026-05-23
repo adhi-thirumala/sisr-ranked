@@ -30,6 +30,13 @@ const readySchema = z.object({
 });
 
 const claimSchema = z.object({ uuid: z.string() });
+const exitSchema = z.object({
+  matchId: z.string().optional(),
+  serverName: z.string().optional(),
+  containerId: z.string().optional(),
+  reason: z.string().optional(),
+  exitCode: z.number().int().optional().nullable(),
+});
 
 interface MatchSocketAttachment {
   kind: 'player' | 'spectator' | 'velocity';
@@ -60,6 +67,7 @@ export class Match extends DurableObject {
       else if (url.pathname === '/internal/seed' && request.method === 'POST') response = await this.handleSeed(request);
       else if (url.pathname === '/ready' && request.method === 'POST') response = await this.handleReady(request);
       else if (url.pathname === '/claim' && request.method === 'POST') response = await this.handleClaim(request);
+      else if (url.pathname === '/exit' && request.method === 'POST') response = await this.handleExit(request);
       else if (url.pathname === '/state' && request.method === 'GET') response = await this.handleState();
       else response = errorResponse(404, 'Not found');
 
@@ -215,6 +223,18 @@ export class Match extends DurableObject {
     return Response.json(publicMatchState(meta));
   }
 
+  private async handleExit(request: Request): Promise<Response> {
+    const input = exitSchema.parse(await parseJson(request));
+    let result: unknown;
+
+    await this.state.blockConcurrencyWhile(async () => {
+      result = await this.markContainerExited(input);
+    });
+
+    logInfo('match.exit.handled', { requestId: requestIdFrom(request), matchId: shortId(input.matchId), reason: input.reason, exitCode: input.exitCode });
+    return Response.json(result);
+  }
+
   private async claim(uuid: string): Promise<unknown> {
     const meta = await this.requireMeta();
     const canonicalWinner = await this.findPersistedWinner(meta.matchId);
@@ -228,6 +248,10 @@ export class Match extends DurableObject {
     if (meta.winnerUuid) {
       logInfo('match.claim.already_decided', { matchId: shortId(meta.matchId), winner: shortId(meta.winnerUuid), claimant: shortId(uuid) });
       return { winner: meta.winnerUuid, youWon: meta.winnerUuid === uuid, alreadyDecided: true };
+    }
+    if (meta.endedAt !== null) {
+      logInfo('match.claim.already_ended', { matchId: shortId(meta.matchId), claimant: shortId(uuid), endedAt: meta.endedAt });
+      return { winner: null, youWon: false, alreadyDecided: true, ended: true };
     }
     if (!meta.players.some((player) => player.uuid === uuid)) {
       throw new HTTPException(403, { message: 'Claimant is not in this match' });
@@ -295,6 +319,46 @@ export class Match extends DurableObject {
     logInfo('match.claim.winner_set', { matchId: shortId(meta.matchId), winner: shortId(uuid), playerCount: meta.players.length });
 
     return { winner: uuid, youWon: true, eloChanges: meta.eloChanges };
+  }
+
+  private async markContainerExited(input: z.infer<typeof exitSchema>): Promise<unknown> {
+    const meta = await this.requireMeta();
+    if (input.matchId && input.matchId !== meta.matchId) {
+      throw new HTTPException(400, { message: 'Exit notification matchId mismatch' });
+    }
+    if (meta.endedAt !== null || meta.winnerUuid) {
+      return { ok: true, alreadyEnded: true, winner: meta.winnerUuid };
+    }
+
+    const endedAt = nowSeconds();
+    meta.endedAt = endedAt;
+    await this.bindings.DB
+      .prepare('UPDATE matches SET ended_at = ? WHERE match_id = ? AND ended_at IS NULL')
+      .bind(endedAt, meta.matchId)
+      .run();
+    await this.state.storage.put('meta', meta);
+    await Promise.all(meta.players.map((player) => this.bindings.ROUTING.delete(routeKey(player.uuid))));
+
+    const message = {
+      type: 'match_aborted',
+      matchId: meta.matchId,
+      reason: input.reason ?? 'container_exited',
+      exitCode: input.exitCode ?? null,
+      serverName: input.serverName ?? meta.serverName,
+      serverAddress: meta.serverAddress,
+    };
+    this.broadcastToPlayers(meta, message);
+    await this.broadcastToVelocity(message);
+
+    logWarn('match.container_exited', {
+      matchId: shortId(meta.matchId),
+      serverName: input.serverName ?? meta.serverName,
+      containerId: shortId(input.containerId),
+      reason: input.reason,
+      exitCode: input.exitCode,
+    });
+
+    return { ok: true, ended: true, ...publicMatchState(meta) };
   }
 
   private async getMeta(): Promise<MatchMeta | null> {

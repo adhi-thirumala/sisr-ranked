@@ -1,0 +1,38 @@
+ARG MINECRAFT_SERVER_IMAGE=docker.io/itzg/minecraft-server:java25
+FROM ${MINECRAFT_SERVER_IMAGE}
+
+ARG MINECRAFT_VERSION
+ARG FABRIC_LOADER_VERSION
+ARG EXTRA_MOD_URLS=""
+
+ENV EULA=TRUE \
+    TYPE=FABRIC \
+    VERSION=${MINECRAFT_VERSION} \
+    FABRIC_LOADER_VERSION=${FABRIC_LOADER_VERSION} \
+    ONLINE_MODE=FALSE \
+    ENFORCE_SECURE_PROFILE=FALSE \
+    PREVENT_PROXY_CONNECTIONS=FALSE \
+    MAX_PLAYERS=2 \
+    VIEW_DISTANCE=6 \
+    SIMULATION_DISTANCE=4 \
+    SPAWN_PROTECTION=0 \
+    ALLOW_FLIGHT=TRUE \
+    PVP=TRUE \
+    INIT_MEMORY=200M \
+    MAX_MEMORY=480M \
+    JVM_OPTS="-XX:+UseG1GC -XX:MaxGCPauseMillis=50"
+
+COPY mods/sisr-mod.jar /tmp/mods/sisr-mod.jar
+
+RUN set -eux; \
+    mkdir -p /data/mods; \
+    cp /tmp/mods/sisr-mod.jar /data/mods/sisr-mod.jar; \
+    if [ -n "${EXTRA_MOD_URLS}" ]; then \
+      index=0; \
+      for mod_url in ${EXTRA_MOD_URLS}; do \
+        index=$((index + 1)); \
+        curl -fsSL "${mod_url}" -o "/data/mods/extra-${index}.jar"; \
+      done; \
+    fi; \
+    SETUP_ONLY=true /start; \
+    rm -rf /tmp/mods

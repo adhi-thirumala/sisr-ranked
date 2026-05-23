@@ -24,19 +24,17 @@
     {
       "binding": "DB",
       "database_name": "sisr-ranked",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "e7e492e5-9c80-428a-ab33-72750d916c3d",
     },
   ],
   "kv_namespaces": [
-    { "binding": "ROUTING", "id": "00000000000000000000000000000000" },
-    { "binding": "CACHE", "id": "00000000000000000000000000000000" },
+    { "binding": "ROUTING", "id": "9b40296e353f4e6f84fabd85aa023366" },
+    { "binding": "CACHE", "id": "2032370354654ccc82dc939bc253a2c3" },
   ],
-  "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["Queue", "Match"] },
-  ],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Queue", "Match"] }],
   "vars": {
     "AGENT_BASE_URL": "https://agent.example.internal",
-    "OAUTH_REDIRECT_URI": "https://example.com/api/auth/microsoft/callback",
+    "OAUTH_REDIRECT_URI": "https://sisr-ranked.adhi-thirumala.workers.dev/api/auth/microsoft/callback",
   },
   "observability": {
     "enabled": true,

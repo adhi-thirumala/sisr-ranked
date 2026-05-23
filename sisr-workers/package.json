@@ -7,7 +7,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
-    "deploy": "wrangler deploy",
+    "deploy": "vite build && wrangler deploy",
     "wrangler:dev": "wrangler dev",
     "wrangler:start": "wrangler dev",
     "cf-typegen": "wrangler types"

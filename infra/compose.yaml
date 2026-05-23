@@ -1,0 +1,49 @@
+name: sisr
+
+services:
+  agent:
+    image: ghcr.io/adhi-thirumala/sisr-agent:latest
+    restart: always
+    environment:
+      LISTEN_ADDR: ":8080"
+      PODMAN_HOST: "unix:///run/podman/podman.sock"
+      PODMAN_NETWORK: "rir-net"
+      MATCH_IMAGE: "${MATCH_IMAGE:-ghcr.io/adhi-thirumala/rir-game:latest}"
+      WORKER_API_BASE: "${WORKER_API_BASE}"
+      AGENT_SERVICE_TOKEN: "${AGENT_SERVICE_TOKEN}"
+      SERVICE_API_TOKEN: "${SERVICE_API_TOKEN}"
+      MATCH_MEMORY: "${MATCH_MEMORY:-768m}"
+      MATCH_MEMORY_SWAP: "${MATCH_MEMORY_SWAP:-768m}"
+      MATCH_CPUS: "${MATCH_CPUS:-1.5}"
+      MATCH_TIMEOUT: "${MATCH_TIMEOUT:-15m}"
+      STOP_GRACE: "${STOP_GRACE:-30s}"
+      VIEW_DISTANCE: "${VIEW_DISTANCE:-6}"
+      SIMULATION_DISTANCE: "${SIMULATION_DISTANCE:-4}"
+      PREGEN_RADIUS: "${PREGEN_RADIUS:-12}"
+      JVM_FLAGS: "${JVM_FLAGS:--Xms200m -Xmx480m -XX:+UseG1GC -XX:MaxGCPauseMillis=50}"
+    volumes:
+      - "${XDG_RUNTIME_DIR}/podman/podman.sock:/run/podman/podman.sock"
+    networks:
+      - rir-net
+
+  velocity:
+    image: "${VELOCITY_IMAGE:-localhost/sisr-velocity:latest}"
+    restart: always
+    ports:
+      - "25565:25565/tcp"
+    environment:
+      RIR_API_BASE: "${WORKER_API_BASE}"
+      RIR_API_TOKEN: "${SERVICE_API_TOKEN}"
+    networks:
+      - rir-net
+
+  cloudflared:
+    image: docker.io/cloudflare/cloudflared:latest
+    restart: always
+    command: tunnel --no-autoupdate run --token "${CLOUDFLARED_TOKEN}"
+    networks:
+      - rir-net
+
+networks:
+  rir-net:
+    name: rir-net

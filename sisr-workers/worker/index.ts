@@ -132,6 +132,12 @@ app.post('/api/match/:matchId/claim', async (c) => {
   return forwardMatchPost(c.env, c.get('requestId'), c.req.param('matchId'), '/claim', await c.req.text());
 });
 
+app.post('/api/match/:matchId/exit', async (c) => {
+  if (!isServiceAuthorized(c.req.raw, c.env)) return c.json({ error: 'Unauthorized' }, 401);
+  logInfo('match.exit.forward', { requestId: c.get('requestId'), matchId: shortId(c.req.param('matchId')) });
+  return forwardMatchPost(c.env, c.get('requestId'), c.req.param('matchId'), '/exit', await c.req.text());
+});
+
 app.get('/api/route/:uuid', async (c) => {
   if (!isServiceAuthorized(c.req.raw, c.env)) return c.json({ error: 'Unauthorized' }, 401);
   const route = await c.env.ROUTING.get(routeKey(c.req.param('uuid')));
@@ -199,7 +205,7 @@ function forwardedHeaders(request: Request): Headers {
   return headers;
 }
 
-function forwardMatchPost(env: RirEnv, requestId: string, matchId: string, path: '/ready' | '/claim', body: string): Promise<Response> {
+function forwardMatchPost(env: RirEnv, requestId: string, matchId: string, path: '/ready' | '/claim' | '/exit', body: string): Promise<Response> {
   return env.MATCH.getByName(matchId).fetch(`https://match.internal${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-rir-request-id': requestId },

@@ -72,6 +72,106 @@ java {
     withSourcesJar()
 }
 
+def matchImageContext = layout.buildDirectory.dir("match-image")
+def matchModJar = layout.buildDirectory.file("libs/${project.archives_base_name}-${project.version}.jar")
+
+def projectValue = { String camelName, String snakeName, String envName, String fallback ->
+    def value = findProperty(camelName)
+    if (value == null) value = findProperty(snakeName)
+    if (value == null) value = System.getenv(envName)
+    if (value == null || value.toString().isBlank()) return fallback
+    return value.toString()
+}
+
+def imageBuilderCommand = {
+    projectValue('imageBuilder', 'image_builder', 'IMAGE_BUILDER', 'podman')
+}
+
+def matchImageName = {
+    projectValue('matchImage', 'match_image', 'MATCH_IMAGE', "localhost/rir-game:${project.version}")
+}
+
+def minecraftServerImageName = {
+    projectValue('minecraftServerImage', 'minecraft_server_image', 'MINECRAFT_SERVER_IMAGE', 'docker.io/itzg/minecraft-server:java25')
+}
+
+def extraModUrls = {
+    projectValue('extraModUrls', 'extra_mod_urls', 'EXTRA_MOD_URLS', '')
+}
+
+def ghcrImageName = {
+    def value = findProperty('ghcrImage') ?: findProperty('ghcr_image') ?: System.getenv('GHCR_IMAGE')
+    if (value == null || value.toString().isBlank()) {
+        def owner = findProperty('ghcrOwner') ?: findProperty('ghcr_owner') ?: System.getenv('GITHUB_REPOSITORY_OWNER')
+        if (owner == null || owner.toString().isBlank()) {
+            throw new GradleException('Set -PghcrImage=ghcr.io/<owner>/rir-game or -PghcrOwner=<owner> before running pushMatchImage')
+        }
+        value = "ghcr.io/${owner}/rir-game"
+    }
+    return value.toString().toLowerCase(java.util.Locale.ROOT)
+}
+
+def imageTagNames = {
+    projectValue('imageTags', 'image_tags', 'IMAGE_TAGS', "${project.version},latest")
+        .split(',')
+        .collect { it.trim() }
+        .findAll { !it.isEmpty() }
+}
+
+tasks.register('prepareMatchImageContext', Copy) {
+    group = 'container'
+    description = 'Prepares build/match-image with the Containerfile and mod jar.'
+    dependsOn tasks.matching { it.name == 'remapJar' || it.name == 'jar' }
+    into(matchImageContext)
+    doFirst {
+        delete matchImageContext
+    }
+    from('src/main/container') {
+        include 'Containerfile'
+    }
+    from(matchModJar) {
+        into 'mods'
+        rename { 'sisr-mod.jar' }
+    }
+}
+
+tasks.named('build') {
+    dependsOn tasks.named('prepareMatchImageContext')
+}
+
+tasks.register('buildMatchImage', Exec) {
+    group = 'container'
+    description = 'Builds the Fabric match server image with Podman or Docker.'
+    dependsOn tasks.named('prepareMatchImageContext')
+    doFirst {
+        def contextDir = matchImageContext.get().asFile
+        commandLine imageBuilderCommand(), 'build',
+                '-f', new File(contextDir, 'Containerfile').absolutePath,
+                '--build-arg', "MINECRAFT_SERVER_IMAGE=${minecraftServerImageName()}",
+                '--build-arg', "MINECRAFT_VERSION=${project.minecraft_version}",
+                '--build-arg', "FABRIC_LOADER_VERSION=${project.loader_version}",
+                '--build-arg', "EXTRA_MOD_URLS=${extraModUrls()}",
+                '-t', matchImageName(),
+                contextDir.absolutePath
+    }
+}
+
+tasks.register('pushMatchImage') {
+    group = 'container'
+    description = 'Tags and pushes the match server image to GHCR.'
+    dependsOn tasks.named('buildMatchImage')
+    doLast {
+        def builder = imageBuilderCommand()
+        def sourceImage = matchImageName()
+        def registryImage = ghcrImageName()
+        imageTagNames().each { tag ->
+            def targetImage = "${registryImage}:${tag}"
+            exec { commandLine builder, 'tag', sourceImage, targetImage }
+            exec { commandLine builder, 'push', targetImage }
+        }
+    }
+}
+
 jar {
     from("LICENSE") {
         rename { "${it}_${project.archives_base_name}" }
