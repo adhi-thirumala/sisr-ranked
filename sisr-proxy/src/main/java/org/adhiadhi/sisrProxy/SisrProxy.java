@@ -32,7 +32,7 @@ import net.kyori.adventure.text.Component;
 import org.slf4j.Logger;
 
 public class SisrProxy {
-  private static final String LOBBY_SERVER = "lobby";
+  private static final Component NO_MATCH_MESSAGE = Component.text("match not found or match not ready spawning");
   private static final Duration ROUTE_TIMEOUT = Duration.ofMillis(1200);
   private static final Gson GSON = new Gson();
 
@@ -57,44 +57,44 @@ public class SisrProxy {
     apiToken = firstEnv("RIR_API_TOKEN", "API_TOKEN");
     if (apiBase == null || apiBase.isBlank()) {
       logger.warn("RIR router disabled: set RIR_API_BASE or API_BASE to route players to matches");
-      return;
+    } else {
+      apiBase = stripTrailingSlash(apiBase);
+      eventsUrl = firstEnv("RIR_EVENTS_WS", "EVENTS_WS");
+      if (eventsUrl == null || eventsUrl.isBlank()) {
+        eventsUrl = eventSocketUrl(apiBase);
+      }
+      if (apiToken == null || apiToken.isBlank()) {
+        logger.warn("RIR router has no service token; route requests will be unauthenticated");
+      }
+      logger.info("RIR router initialized with API base {}", apiBase);
+      connectEventSocket();
     }
-
-    apiBase = stripTrailingSlash(apiBase);
-    eventsUrl = firstEnv("RIR_EVENTS_WS", "EVENTS_WS");
-    if (eventsUrl == null || eventsUrl.isBlank()) {
-      eventsUrl = eventSocketUrl(apiBase);
-    }
-    if (apiToken == null || apiToken.isBlank()) {
-      logger.warn("RIR router has no service token; route requests will be unauthenticated");
-    }
-    logger.info("RIR router initialized with API base {}", apiBase);
-    connectEventSocket();
   }
 
   @Subscribe
   public EventTask onPlayerChooseInitialServer(PlayerChooseInitialServerEvent event) {
-    Optional<RegisteredServer> fallback = proxy.getServer(LOBBY_SERVER);
     if (apiBase == null || apiBase.isBlank()) {
-      fallback.ifPresent(event::setInitialServer);
       return null;
     }
 
     UUID uuid = event.getPlayer().getUniqueId();
+    logger.info("Player {} ({}) is choosing initial server", event.getPlayer().getUsername(), uuid);
     String currentApiBase = apiBase;
     String currentApiToken = apiToken;
     CompletableFuture<Void> routeSelection = fetchRouteAsync(uuid, currentApiBase, currentApiToken).thenAccept(route -> {
       if (route == null) {
-        fallback.ifPresent(event::setInitialServer);
+        logger.info("No match found for {} ({}), disconnecting", event.getPlayer().getUsername(), uuid);
+        event.getPlayer().disconnect(NO_MATCH_MESSAGE);
         return;
       }
 
       try {
         RegisteredServer server = registerRoute(route);
+        logger.info("Routing {} ({}) to match server {}", event.getPlayer().getUsername(), uuid, route.serverAddress());
         event.setInitialServer(server);
       } catch (RuntimeException ex) {
         logger.warn("Failed to register route {} for {}", route.serverAddress(), uuid, ex);
-        fallback.ifPresent(event::setInitialServer);
+        event.getPlayer().disconnect(NO_MATCH_MESSAGE);
       }
     });
     return EventTask.resumeWhenComplete(routeSelection);
@@ -117,13 +117,7 @@ public class SisrProxy {
       return;
     }
 
-    Optional<RegisteredServer> lobby = proxy.getServer(LOBBY_SERVER);
-    Component message = Component.text("Your match server is still starting. Please try again in a few seconds.");
-    if (lobby.isPresent()) {
-      event.setResult(KickedFromServerEvent.RedirectPlayer.create(lobby.get(), message));
-    } else {
-      event.setResult(KickedFromServerEvent.DisconnectPlayer.create(message));
-    }
+    event.setResult(KickedFromServerEvent.DisconnectPlayer.create(NO_MATCH_MESSAGE));
     cleanupIfEmpty(serverName);
   }
 
@@ -256,10 +250,6 @@ public class SisrProxy {
 
     for (UUID uuid : event.players()) {
       proxy.getPlayer(uuid).ifPresent(player -> {
-        Optional<RegisteredServer> current = player.getCurrentServer().map(connection -> connection.getServer());
-        if (current.isPresent() && !LOBBY_SERVER.equals(current.get().getServerInfo().getName())) {
-          return;
-        }
         player.createConnectionRequest(matchServer).connect().whenComplete((result, error) -> {
           if (error != null) {
             logger.warn("Failed to move {} to match {}", uuid, event.matchId(), error);
