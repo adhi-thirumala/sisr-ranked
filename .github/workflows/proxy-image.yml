@@ -1,4 +1,4 @@
-name: Agent Image
+name: Proxy Image
 
 on:
   push:
@@ -7,12 +7,12 @@ on:
     tags:
       - 'v*'
     paths:
-      - 'container-agent/**'
-      - '.github/workflows/agent-image.yml'
+      - 'sisr-proxy/**'
+      - '.github/workflows/proxy-image.yml'
   pull_request:
     paths:
-      - 'container-agent/**'
-      - '.github/workflows/agent-image.yml'
+      - 'sisr-proxy/**'
+      - '.github/workflows/proxy-image.yml'
   workflow_dispatch:
 
 permissions:
@@ -26,6 +26,21 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+
+      - name: Prepare proxy image context
+        working-directory: sisr-proxy
+        run: gradle prepareProxyImageContext
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -37,7 +52,7 @@ jobs:
         shell: bash
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          echo "name=ghcr.io/${owner}/sisr-agent" >> "$GITHUB_OUTPUT"
+          echo "name=ghcr.io/${owner}/sisr-proxy" >> "$GITHUB_OUTPUT"
 
       - name: Set image metadata
         id: meta
@@ -92,38 +107,38 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push agent image
+      - name: Build and push proxy image
         uses: docker/build-push-action@v6
         with:
-          context: ./container-agent
-          file: ./container-agent/Dockerfile
+          context: ./sisr-proxy/build/proxy-image
+          file: ./sisr-proxy/build/proxy-image/Containerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=agent-image
-          cache-to: type=gha,mode=max,scope=agent-image
+          cache-from: type=gha,scope=proxy-image
+          cache-to: type=gha,mode=max,scope=proxy-image
 
-      - name: Build and push agent image x86 tags
+      - name: Build and push proxy image x86 tags
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
-          context: ./container-agent
-          file: ./container-agent/Dockerfile
+          context: ./sisr-proxy/build/proxy-image
+          file: ./sisr-proxy/build/proxy-image/Containerfile
           platforms: linux/amd64
           push: true
           tags: ${{ steps.arch_meta.outputs.amd64_tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=agent-image
+          cache-from: type=gha,scope=proxy-image
 
-      - name: Build and push agent image arm64 tags
+      - name: Build and push proxy image arm64 tags
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
-          context: ./container-agent
-          file: ./container-agent/Dockerfile
+          context: ./sisr-proxy/build/proxy-image
+          file: ./sisr-proxy/build/proxy-image/Containerfile
           platforms: linux/arm64
           push: true
           tags: ${{ steps.arch_meta.outputs.arm64_tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=agent-image
+          cache-from: type=gha,scope=proxy-image

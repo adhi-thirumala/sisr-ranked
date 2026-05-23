@@ -18,12 +18,9 @@ export interface AllocateMatchInput {
 export async function allocateMatch(env: RirEnv, input: AllocateMatchInput): Promise<AllocationResult> {
   const startedAt = Date.now();
   logInfo('allocator.match.start.request', { matchId: shortId(input.matchId), playerCount: input.players.length, targetItem: input.targetItem });
-  const response = await fetch(`${trimTrailingSlash(env.AGENT_BASE_URL)}/match/start`, {
+  const response = await env.AGENT.fetch('http://agent:8080/match/start', {
     method: 'POST',
-    headers: {
-      authorization: `Bearer ${env.AGENT_SERVICE_TOKEN}`,
-      'content-type': 'application/json',
-    },
+    headers: agentHeaders(env),
     body: JSON.stringify({
       matchId: input.matchId,
       players: input.players,
@@ -76,12 +73,9 @@ export async function allocateMatch(env: RirEnv, input: AllocateMatchInput): Pro
 export async function stopMatch(env: RirEnv, matchId: string): Promise<void> {
   const startedAt = Date.now();
   logInfo('allocator.match.stop.request', { matchId: shortId(matchId) });
-  const response = await fetch(`${trimTrailingSlash(env.AGENT_BASE_URL)}/match/stop`, {
+  const response = await env.AGENT.fetch('http://agent:8080/match/stop', {
     method: 'POST',
-    headers: {
-      authorization: `Bearer ${env.AGENT_SERVICE_TOKEN}`,
-      'content-type': 'application/json',
-    },
+    headers: agentHeaders(env),
     body: JSON.stringify({ matchId }),
   });
 
@@ -94,8 +88,11 @@ export async function stopMatch(env: RirEnv, matchId: string): Promise<void> {
   logInfo('allocator.match.stop.ok', { matchId: shortId(matchId), durationMs: Date.now() - startedAt });
 }
 
-function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/, '');
+function agentHeaders(env: RirEnv): Headers {
+  return new Headers({
+    authorization: `Bearer ${env.AGENT_SERVICE_TOKEN}`,
+    'content-type': 'application/json',
+  });
 }
 
 function truncate(value: string, maxLength = 500): string {

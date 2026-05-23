@@ -18,4 +18,4 @@ Copy `.env.example` to `.env` outside the repo or fill equivalent environment va
 podman-compose up -d
 ```
 
-The Agent listens only inside the Compose network on port `8080`; Cloudflare Tunnel is the ingress path from the Worker.
+The Agent listens only inside the Compose network on port `8080`; Cloudflare Tunnel is the private ingress path from the Worker VPC service binding. Do not configure a public tunnel hostname for the Agent.

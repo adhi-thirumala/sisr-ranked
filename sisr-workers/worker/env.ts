@@ -7,7 +7,7 @@ export interface RirEnv {
   CACHE: KVNamespace;
   QUEUE: DurableObjectNamespace;
   MATCH: DurableObjectNamespace;
-  AGENT_BASE_URL: string;
+  AGENT: Fetcher;
   OAUTH_REDIRECT_URI?: string;
   MS_CLIENT_ID: string;
   MS_CLIENT_SECRET?: string;

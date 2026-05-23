@@ -31,9 +31,15 @@
     { "binding": "ROUTING", "id": "9b40296e353f4e6f84fabd85aa023366" },
     { "binding": "CACHE", "id": "2032370354654ccc82dc939bc253a2c3" },
   ],
+  "vpc_services": [
+    {
+      "binding": "AGENT",
+      "service_id": "019e5342-f0b1-7d41-9374-6349f7f01eb5",
+      "remote": true,
+    },
+  ],
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Queue", "Match"] }],
   "vars": {
-    "AGENT_BASE_URL": "https://agent.example.internal",
     "OAUTH_REDIRECT_URI": "https://sisr-ranked.adhi-thirumala.workers.dev/api/auth/microsoft/callback",
   },
   "observability": {
