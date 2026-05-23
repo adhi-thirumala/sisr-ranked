@@ -10,8 +10,9 @@ repositories {
     maven("https://repo.papermc.io/repository/maven-public/")
 }
 
-val velocityApiVersion = "3.5.0-SNAPSHOT"
-val defaultVelocityRuntimeVersion = "latest"
+val velocityApiVersion = providers.gradleProperty("velocity_api_version").orNull ?: "3.4.0-SNAPSHOT"
+val defaultVelocityRuntimeVersion = providers.gradleProperty("velocity_runtime_version").orNull ?: velocityApiVersion
+val defaultVelocityBuild = providers.gradleProperty("velocity_build").orNull ?: "559"
 val proxyImageContext = layout.buildDirectory.dir("proxy-image")
 
 dependencies {
@@ -36,7 +37,7 @@ fun velocityRuntimeVersion() = projectValue(
     defaultVelocityRuntimeVersion,
 )
 
-fun velocityBuild() = projectValue("velocityBuild", "velocity_build", "VELOCITY_BUILD", "latest")
+fun velocityBuild() = projectValue("velocityBuild", "velocity_build", "VELOCITY_BUILD", defaultVelocityBuild)
 
 fun ghcrImageName(): String {
     val configured = findProperty("ghcrImage")
@@ -70,7 +71,7 @@ tasks {
         // Configure the Velocity version for our task.
         // This is the only required configuration besides applying the plugin.
         // Your plugin's jar (or shadowJar if present) will be used automatically.
-        velocityVersion(velocityApiVersion)
+        velocityVersion(velocityRuntimeVersion())
     }
 
     processResources {

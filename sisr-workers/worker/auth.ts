@@ -1,7 +1,7 @@
 import { generateCodeVerifier, generateState, MicrosoftEntraId } from 'arctic';
 import { z } from 'zod';
 import type { RirEnv } from './env';
-import { clearOAuthStateCookie, readOAuthStateCookie, setOAuthStateCookie, setSessionCookie, type RirContext } from './session';
+import { clearOAuthStateCookie, clearSessionCookie, readOAuthStateCookie, setOAuthStateCookie, setSessionCookie, type RirContext } from './session';
 import { upsertUser } from './db';
 import { errorFields, logError, logInfo, shortId } from './logging';
 import { normalizeUuid } from './uuid';
@@ -13,7 +13,11 @@ const xblTokenSchema = z.object({
 const microsoftTokenSchema = z.object({ access_token: z.string() });
 const minecraftLoginSchema = z.object({ access_token: z.string() });
 const minecraftProfileSchema = z.object({ id: z.string(), name: z.string() });
+const minecraftEntitlementsSchema = z.object({
+  items: z.array(z.object({ name: z.string() })).default([]),
+});
 const MICROSOFT_TENANT = 'consumers';
+const MINECRAFT_JAVA_ENTITLEMENTS = new Set(['product_minecraft', 'game_minecraft']);
 
 export async function startMicrosoftAuth(c: RirContext): Promise<Response> {
   const state = generateState();
@@ -52,6 +56,12 @@ export async function finishMicrosoftAuth(c: RirContext): Promise<Response> {
     const userHash = xsts.DisplayClaims.xui[0].uhs;
     const minecraftAccessToken = await loginWithMinecraft(userHash, xsts.Token);
     logAuthStep('minecraft_token_acquired', { requestId: c.get('requestId') });
+    const ownsMinecraftJava = await hasMinecraftJavaEntitlement(minecraftAccessToken);
+    logAuthStep('minecraft_entitlements_checked', { requestId: c.get('requestId'), ownsMinecraftJava });
+    if (!ownsMinecraftJava) {
+      clearSessionCookie(c);
+      return redirectWithError(c, 'This Microsoft account does not own Minecraft: Java Edition.');
+    }
     const profile = await fetchMinecraftProfile(minecraftAccessToken);
     logAuthStep('minecraft_profile_fetched', { requestId: c.get('requestId'), user: shortId(profile.id), name: profile.name });
     const uuid = parseMinecraftUuid(profile.id);
@@ -167,6 +177,19 @@ async function fetchMinecraftProfile(accessToken: string): Promise<z.infer<typeo
 
   const json = await parseOAuthResponse(response, 'Minecraft profile lookup failed');
   return minecraftProfileSchema.parse(json);
+}
+
+async function hasMinecraftJavaEntitlement(accessToken: string): Promise<boolean> {
+  const response = await fetch('https://api.minecraftservices.com/entitlements/mcstore', {
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      accept: 'application/json',
+    },
+  });
+
+  const json = await parseOAuthResponse(response, 'Minecraft entitlements lookup failed');
+  const entitlements = minecraftEntitlementsSchema.parse(json);
+  return entitlements.items.some((item) => MINECRAFT_JAVA_ENTITLEMENTS.has(item.name));
 }
 
 async function parseOAuthResponse(response: Response, fallback: string): Promise<unknown> {

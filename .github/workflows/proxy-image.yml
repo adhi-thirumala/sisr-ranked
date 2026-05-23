@@ -41,6 +41,27 @@ jobs:
         working-directory: sisr-proxy
         run: gradle prepareProxyImageContext
 
+      - name: Read proxy build args
+        id: proxy_args
+        shell: bash
+        run: |
+          set -euo pipefail
+          velocity_runtime_version="3.4.0-SNAPSHOT"
+          velocity_build="559"
+
+          while IFS='=' read -r key value; do
+            case "$key" in
+              velocity_runtime_version) velocity_runtime_version="$value" ;;
+              velocity_build) velocity_build="$value" ;;
+            esac
+          done < sisr-proxy/gradle.properties
+
+          : "${velocity_runtime_version:?missing velocity_runtime_version in sisr-proxy/gradle.properties}"
+          : "${velocity_build:?missing velocity_build in sisr-proxy/gradle.properties}"
+
+          echo "velocity_runtime_version=${velocity_runtime_version}" >> "$GITHUB_OUTPUT"
+          echo "velocity_build=${velocity_build}" >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -116,6 +137,9 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VELOCITY_VERSION=${{ steps.proxy_args.outputs.velocity_runtime_version }}
+            VELOCITY_BUILD=${{ steps.proxy_args.outputs.velocity_build }}
           cache-from: type=gha,scope=proxy-image
           cache-to: type=gha,mode=max,scope=proxy-image
 
@@ -129,6 +153,9 @@ jobs:
           push: true
           tags: ${{ steps.arch_meta.outputs.amd64_tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VELOCITY_VERSION=${{ steps.proxy_args.outputs.velocity_runtime_version }}
+            VELOCITY_BUILD=${{ steps.proxy_args.outputs.velocity_build }}
           cache-from: type=gha,scope=proxy-image
 
       - name: Build and push proxy image arm64 tags
@@ -141,4 +168,7 @@ jobs:
           push: true
           tags: ${{ steps.arch_meta.outputs.arm64_tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VELOCITY_VERSION=${{ steps.proxy_args.outputs.velocity_runtime_version }}
+            VELOCITY_BUILD=${{ steps.proxy_args.outputs.velocity_build }}
           cache-from: type=gha,scope=proxy-image
