@@ -10,10 +10,15 @@ repositories {
     maven("https://repo.papermc.io/repository/maven-public/")
 }
 
-val velocityApiVersion = providers.gradleProperty("velocity_api_version").orNull ?: "3.4.0-SNAPSHOT"
-val defaultVelocityRuntimeVersion = providers.gradleProperty("velocity_runtime_version").orNull ?: velocityApiVersion
-val defaultVelocityBuild = providers.gradleProperty("velocity_build").orNull ?: "559"
+val velocityApiVersion = "3.5.0-SNAPSHOT"
+val velocityRuntimeVersion = "3.5.0-SNAPSHOT"
+val velocityBuild = "597"
+val velocityDownloadUrl =
+    "https://fill-data.papermc.io/v1/objects/ff08e7cae29dea20fcdb4f14092d825add6d265d5b2599ea5d5dbf54cb43c2d6/velocity-${velocityRuntimeVersion}-${velocityBuild}.jar"
+
 val proxyImageContext = layout.buildDirectory.dir("proxy-image")
+
+val downloadedVelocityJar = layout.buildDirectory.file("velocity/velocity.jar")
 
 dependencies {
     compileOnly("com.velocitypowered:velocity-api:$velocityApiVersion")
@@ -29,15 +34,6 @@ fun projectValue(camelName: String, snakeName: String, envName: String, fallback
 fun imageBuilderCommand() = projectValue("imageBuilder", "image_builder", "IMAGE_BUILDER", "podman")
 
 fun proxyImageName() = projectValue("proxyImage", "proxy_image", "PROXY_IMAGE", "localhost/sisr-proxy:${project.version}")
-
-fun velocityRuntimeVersion() = projectValue(
-    "velocityRuntimeVersion",
-    "velocity_runtime_version",
-    "VELOCITY_RUNTIME_VERSION",
-    defaultVelocityRuntimeVersion,
-)
-
-fun velocityBuild() = projectValue("velocityBuild", "velocity_build", "VELOCITY_BUILD", defaultVelocityBuild)
 
 fun ghcrImageName(): String {
     val configured = findProperty("ghcrImage")
@@ -67,11 +63,40 @@ java {
 }
 
 tasks {
+    /**
+     * Download the Velocity runtime jar and keep it cached in the build directory
+     * so every build (local run and Docker image) uses the exact same artifact
+     * without making network calls inside the container.
+     */
+    val downloadVelocityRuntime by registering {
+        group = "velocity"
+        description = "Downloads the Velocity proxy server jar."
+        val dest = downloadedVelocityJar.get().asFile
+        outputs.file(dest)
+
+        doLast {
+            if (!dest.exists()) {
+                dest.parentFile.mkdirs()
+                try {
+                    ant.invokeMethod("get", mapOf(
+                        "src" to velocityDownloadUrl,
+                        "dest" to dest,
+                        "verbose" to true,
+                    ))
+                } catch (_: Exception) {
+                    val body = dest.readText()
+                    if (body.startsWith("{") || body.startsWith("<")) {
+                        dest.delete()
+                        throw GradleException("Download from $velocityDownloadUrl returned an HTML/JSON error page instead of a jar")
+                    }
+                }
+            }
+        }
+    }
+
     runVelocity {
-        // Configure the Velocity version for our task.
-        // This is the only required configuration besides applying the plugin.
-        // Your plugin's jar (or shadowJar if present) will be used automatically.
-        velocityVersion(velocityRuntimeVersion())
+        velocityVersion(velocityRuntimeVersion)
+        dependsOn(downloadVelocityRuntime)
     }
 
     processResources {
@@ -83,8 +108,8 @@ tasks {
 
     val prepareProxyImageContext by registering(Sync::class) {
         group = "container"
-        description = "Prepares build/proxy-image with the Containerfile and proxy plugin jar."
-        dependsOn(jar)
+        description = "Prepares build/proxy-image with everything needed to build the Docker image."
+        dependsOn(jar, downloadVelocityRuntime)
         into(proxyImageContext)
         from("src/main/container") {
             include("Containerfile", "entrypoint.sh")
@@ -92,6 +117,9 @@ tasks {
         from(jar) {
             into("plugins")
             rename { "sisr-proxy.jar" }
+        }
+        from(downloadedVelocityJar) {
+            rename { "velocity.jar" }
         }
     }
 
@@ -109,10 +137,6 @@ tasks {
             "build",
             "-f",
             contextDir.resolve("Containerfile").absolutePath,
-            "--build-arg",
-            "VELOCITY_VERSION=${velocityRuntimeVersion()}",
-            "--build-arg",
-            "VELOCITY_BUILD=${velocityBuild()}",
             "-t",
             proxyImageName(),
             contextDir.absolutePath,

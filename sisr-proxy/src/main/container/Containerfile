@@ -1,34 +1,4 @@
 ARG JAVA_RUNTIME_IMAGE=docker.io/library/amazoncorretto:21-alpine-jdk
-ARG VELOCITY_DOWNLOADER_IMAGE=docker.io/alpine:3.22
-
-FROM ${VELOCITY_DOWNLOADER_IMAGE} AS velocity
-
-ARG VELOCITY_VERSION=3.4.0-SNAPSHOT
-ARG VELOCITY_BUILD=559
-
-RUN apk add --no-cache curl jq
-
-RUN set -eux; \
-    project_url="https://api.papermc.io/v2/projects/velocity"; \
-    if [ "${VELOCITY_VERSION}" = "latest" ]; then \
-      curl -fsSL "${project_url}" -o /tmp/velocity-project.json; \
-      version="$(jq -r '.versions[-1]' /tmp/velocity-project.json)"; \
-    else \
-      version="${VELOCITY_VERSION}"; \
-    fi; \
-    [ -n "${version}" ] && [ "${version}" != "null" ]; \
-    builds_url="${project_url}/versions/${version}/builds"; \
-    if [ "${VELOCITY_BUILD}" = "latest" ]; then \
-      curl -fsSL "${builds_url}" -o /tmp/velocity-builds.json; \
-      build="$(jq -r '.builds[-1].build' /tmp/velocity-builds.json)"; \
-    else \
-      build="${VELOCITY_BUILD}"; \
-    fi; \
-    [ -n "${build}" ] && [ "${build}" != "null" ]; \
-    curl -fsSL "${builds_url}/${build}" -o /tmp/velocity-build.json; \
-    download_name="$(jq -r '.downloads.application.name' /tmp/velocity-build.json)"; \
-    [ -n "${download_name}" ] && [ "${download_name}" != "null" ]; \
-    curl -fsSL "${builds_url}/${build}/downloads/${download_name}" -o /velocity.jar
 
 FROM ${JAVA_RUNTIME_IMAGE}
 
@@ -39,7 +9,7 @@ RUN addgroup -S velocity \
     && mkdir -p /opt/velocity/plugins /server/plugins \
     && chown -R velocity:velocity /opt/velocity /server
 
-COPY --from=velocity --chown=velocity:velocity /velocity.jar /opt/velocity/velocity.jar
+COPY --chown=velocity:velocity velocity.jar /opt/velocity/velocity.jar
 COPY --chown=velocity:velocity plugins/sisr-proxy.jar /opt/velocity/plugins/sisr-proxy.jar
 COPY --chown=velocity:velocity entrypoint.sh /usr/local/bin/velocity-entrypoint
 
