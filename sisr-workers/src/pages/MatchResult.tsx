@@ -13,6 +13,7 @@ import {
   copyToClipboard,
   formatItemName,
   formatRating,
+  forfeitMatch as requestForfeitMatch,
   type MatchPlayer,
   type MatchState,
 } from '@/lib/api';
@@ -26,6 +27,8 @@ export default function MatchResult() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [isForfeiting, setIsForfeiting] = useState(false);
+  const [forfeitError, setForfeitError] = useState<string | null>(null);
   const socketStatus = useMatchSocket(id ?? null, (message) => {
     setMatchState((current) => applyMatchRealtimeMessage(current, message));
   });
@@ -53,6 +56,7 @@ export default function MatchResult() {
   }, [id]);
 
   const winner = matchState?.winner ? matchState.players.find((player) => player.uuid === matchState.winner) : null;
+  const forfeiter = matchState?.forfeited ? matchState.players.find((player) => player.uuid === matchState.forfeited) : null;
   const youWon = Boolean(user && matchState?.winner === user.uuid);
 
   async function copyServerAddress(): Promise<void> {
@@ -60,6 +64,31 @@ export default function MatchResult() {
     const ok = await copyToClipboard(matchState.serverAddress);
     setCopied(ok);
     window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  async function forfeitCurrentMatch(): Promise<void> {
+    if (!id || !matchState || matchState.winner || matchState.aborted) return;
+    if (!window.confirm('Forfeit this match? This will count as a ranked loss.')) return;
+
+    setForfeitError(null);
+    setIsForfeiting(true);
+    try {
+      const result = await requestForfeitMatch(id);
+      setMatchState((current) => {
+        if (!current || current.matchId !== id) return current;
+        return {
+          ...current,
+          winner: result.winner,
+          endedAt: current.endedAt ?? Math.floor(Date.now() / 1000),
+          eloChanges: result.eloChanges ?? current.eloChanges,
+          forfeited: result.forfeited && user ? user.uuid : current.forfeited,
+        };
+      });
+    } catch (caught) {
+      setForfeitError(caught instanceof Error ? caught.message : 'Failed to forfeit match');
+    } finally {
+      setIsForfeiting(false);
+    }
   }
 
   return (
@@ -86,7 +115,9 @@ export default function MatchResult() {
         <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
           <CardHeader>
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={matchState?.winner ? 'default' : 'secondary'}>{matchState?.winner ? 'Final' : 'Live match'}</Badge>
+              <Badge variant={matchState?.aborted ? 'destructive' : matchState?.winner ? 'default' : 'secondary'}>
+                {matchState?.aborted ? 'Aborted' : matchState?.winner ? 'Final' : 'Live match'}
+              </Badge>
               <Badge variant="outline">Socket: {socketStatus}</Badge>
               {matchState?.ready ? <Badge variant="outline">Ready</Badge> : null}
             </div>
@@ -113,12 +144,22 @@ export default function MatchResult() {
                     <div>
                       <p className="text-sm text-muted-foreground">Status</p>
                       <p className="text-xl font-semibold">
-                        {matchState.winner ? `${winner?.name ?? 'Winner'} claimed ${formatItemName(matchState.targetItem)}` : 'Race in progress'}
+                        {matchState.aborted
+                          ? 'Match cleaned up'
+                          : forfeiter
+                            ? `${forfeiter.name ?? 'A player'} forfeited`
+                          : matchState.winner
+                            ? `${winner?.name ?? 'Winner'} claimed ${formatItemName(matchState.targetItem)}`
+                            : 'Race in progress'}
                       </p>
                     </div>
                   </div>
                   <p className="mt-4 text-sm text-muted-foreground">
-                    {matchState.winner
+                    {matchState.aborted
+                      ? `This match was removed and will not count. Reason: ${matchState.abortReason ?? 'server error'}.`
+                      : forfeiter
+                        ? `${winner?.name ?? 'The opponent'} wins by forfeit. ELO is reflected below.`
+                      : matchState.winner
                       ? youWon
                         ? 'You won this ranked race. ELO is reflected below.'
                         : 'The match result was decided by the Match DO claim arbiter.'
@@ -132,9 +173,15 @@ export default function MatchResult() {
                   <Button variant="outline" className="mt-3" onClick={() => void copyServerAddress()}>
                     {copied ? 'Copied' : 'Copy address'}
                   </Button>
+                  {matchState.winner || matchState.aborted ? null : (
+                    <Button variant="destructive" className="mt-3 ml-2" onClick={() => void forfeitCurrentMatch()} disabled={isForfeiting}>
+                      {isForfeiting ? 'Forfeiting...' : 'Forfeit match'}
+                    </Button>
+                  )}
                 </div>
               </div>
             ) : null}
+            {forfeitError ? <p className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{forfeitError}</p> : null}
           </CardContent>
         </Card>
 

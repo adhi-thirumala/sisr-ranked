@@ -108,6 +108,15 @@ app.get('/api/match/:matchId/ws', async (c) => {
   return c.env.MATCH.getByName(c.req.param('matchId')).fetch('https://match.internal/ws', { method: 'GET', headers });
 });
 
+app.post('/api/match/:matchId/forfeit', async (c) => {
+  const user = await requireUser(c);
+  const headers = forwardedHeaders(c.req.raw);
+  headers.set('x-rir-request-id', c.get('requestId'));
+  headers.set('x-rir-user', JSON.stringify({ uuid: user.uuid }));
+  logInfo('match.forfeit.forward', { requestId: c.get('requestId'), matchId: shortId(c.req.param('matchId')), user: shortId(user.uuid) });
+  return c.env.MATCH.getByName(c.req.param('matchId')).fetch('https://match.internal/forfeit', { method: 'POST', headers });
+});
+
 app.get('/api/velocity/events', (c) => {
   if (!isServiceAuthorized(c.req.raw, c.env)) return c.json({ error: 'Unauthorized' }, 401);
   const headers = forwardedHeaders(c.req.raw);

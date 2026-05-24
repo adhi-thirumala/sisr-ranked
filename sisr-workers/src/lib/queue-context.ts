@@ -11,9 +11,11 @@ export interface QueueContextValue {
   reveal: RevealConfig | null;
   revealComplete: boolean;
   matchSocketStatus: MatchSocketStatus;
+  isForfeitingMatch: boolean;
   joinQueue: () => void;
   leaveQueue: () => void;
   queueAgain: () => void;
+  forfeitMatch: () => Promise<void>;
   markRevealComplete: () => void;
 }
 

@@ -32,11 +32,14 @@ export default function Queue() {
     reveal,
     revealComplete,
     matchSocketStatus,
+    isForfeitingMatch,
     joinQueue,
     leaveQueue,
     queueAgain: queueAgainAction,
+    forfeitMatch,
     markRevealComplete,
   } = useQueue();
+  const [forfeitError, setForfeitError] = useState<string | null>(null);
   const queuedSeconds = useElapsedSeconds(queueStatus.phase === 'connecting' || queueStatus.phase === 'queued', queuedSince);
 
   const opponent = match?.players.find((player) => player.uuid !== user?.uuid) ?? null;
@@ -53,6 +56,19 @@ export default function Queue() {
   function queueAgain(): void {
     queueAgainAction();
     setCopied(false);
+    setForfeitError(null);
+  }
+
+  async function requestForfeit(): Promise<void> {
+    if (!match || matchState?.winner || matchState?.aborted) return;
+    if (!window.confirm('Forfeit this match? This will count as a ranked loss.')) return;
+
+    setForfeitError(null);
+    try {
+      await forfeitMatch();
+    } catch (error) {
+      setForfeitError(error instanceof Error ? error.message : 'Failed to forfeit match');
+    }
   }
 
   return (
@@ -70,8 +86,8 @@ export default function Queue() {
               <Link to={`/profile/${user.uuid}`}>{user.name}</Link>
             </Button>
           ) : null}
-          <Badge variant={matchState?.winner ? 'default' : match ? 'secondary' : 'outline'}>
-            {matchState?.winner ? 'Match complete' : match ? 'Match found' : 'Ranked queue'}
+          <Badge variant={matchState?.aborted ? 'destructive' : matchState?.winner ? 'default' : match ? 'secondary' : 'outline'}>
+            {matchState?.aborted ? 'Match aborted' : matchState?.winner ? 'Match complete' : match ? 'Match found' : 'Ranked queue'}
           </Badge>
           <LogoutButton />
         </div>
@@ -105,7 +121,11 @@ export default function Queue() {
               revealComplete={revealComplete}
               copied={copied}
               matchSocketStatus={matchSocketStatus}
+              canForfeit={!matchState.winner && !matchState.aborted}
+              isForfeiting={isForfeitingMatch}
+              forfeitError={forfeitError}
               onCopy={() => void copyServerAddress()}
+              onForfeit={() => void requestForfeit()}
             />
           ) : null}
         </div>
@@ -138,6 +158,8 @@ export default function Queue() {
           {matchState?.winner ? (
             <PostMatchPanel matchState={matchState} winner={winner} youWon={youWon} onQueueAgain={queueAgain} />
           ) : null}
+
+          {matchState?.aborted && !matchState.winner ? <AbortedMatchPanel matchState={matchState} onQueueAgain={queueAgain} /> : null}
         </div>
       </section>
     </main>
@@ -335,14 +357,22 @@ function ConnectPanel({
   revealComplete,
   copied,
   matchSocketStatus,
+  canForfeit,
+  isForfeiting,
+  forfeitError,
   onCopy,
+  onForfeit,
 }: {
   match: MatchFoundMessage;
   matchState: MatchState;
   revealComplete: boolean;
   copied: boolean;
   matchSocketStatus: string;
+  canForfeit: boolean;
+  isForfeiting: boolean;
+  forfeitError: string | null;
   onCopy: () => void;
+  onForfeit: () => void;
 }) {
   return (
     <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
@@ -370,11 +400,33 @@ function ConnectPanel({
           Target item: <span className="font-medium text-foreground">{formatItemName(match.targetItem)}</span>. If you are already in the lobby,
           Velocity will move you as soon as the Match DO broadcasts readiness.
         </p>
+        {forfeitError ? <p className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{forfeitError}</p> : null}
       </CardContent>
-      <CardFooter>
+      <CardFooter className="flex flex-wrap gap-2">
         <Button asChild variant="ghost">
           <Link to={`/match/${match.matchId}`}>Open match page</Link>
         </Button>
+        {canForfeit ? (
+          <Button variant="destructive" onClick={onForfeit} disabled={isForfeiting}>
+            {isForfeiting ? 'Forfeiting...' : 'Forfeit match'}
+          </Button>
+        ) : null}
+      </CardFooter>
+    </Card>
+  );
+}
+
+function AbortedMatchPanel({ matchState, onQueueAgain }: { matchState: MatchState; onQueueAgain: () => void }) {
+  return (
+    <Card className="border-destructive/30 bg-card/90 shadow-2xl shadow-destructive/10">
+      <CardHeader>
+        <CardTitle className="text-2xl font-bold tracking-tight text-destructive">Match ended</CardTitle>
+        <CardDescription>
+          This match was cleaned up and will not count. Reason: {matchState.abortReason ?? 'server error'}.
+        </CardDescription>
+      </CardHeader>
+      <CardFooter>
+        <Button onClick={onQueueAgain}>Queue again</Button>
       </CardFooter>
     </Card>
   );
@@ -391,14 +443,19 @@ function PostMatchPanel({
   youWon: boolean;
   onQueueAgain: () => void;
 }) {
+  const forfeiter = matchState.forfeited ? matchState.players.find((player) => player.uuid === matchState.forfeited) : null;
   return (
     <Card className="border-primary/30 bg-card/90 shadow-2xl shadow-primary/10">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-2xl">
           <HugeiconsIcon icon={Trophy} size={24} className="text-primary" />
-          {youWon ? 'You won the race' : 'Race complete'}
+          {forfeiter ? (youWon ? 'Opponent forfeited' : 'You forfeited') : youWon ? 'You won the race' : 'Race complete'}
         </CardTitle>
-        <CardDescription>{winner?.name ?? 'The winner'} claimed {formatItemName(matchState.targetItem)} first.</CardDescription>
+        <CardDescription>
+          {forfeiter
+            ? `${forfeiter.name ?? 'A player'} forfeited. ${winner?.name ?? 'The opponent'} wins this ranked match.`
+            : `${winner?.name ?? 'The winner'} claimed ${formatItemName(matchState.targetItem)} first.`}
+        </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         {matchState.players.map((player) => {

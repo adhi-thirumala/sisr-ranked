@@ -1,12 +1,12 @@
 import { DurableObject } from 'cloudflare:workers';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
-import { stopMatch } from './allocator';
 import { calculateOneVOneElo } from './elo';
 import type { MatchMeta, RirEnv, RouteEntry } from './env';
 import { LEADERBOARD_CACHE_KEY, routeKey, ROUTE_TTL_SECONDS, VELOCITY_HUB_NAME } from './env';
 import { internalHeaders, isWebSocketUpgrade, nowSeconds, requireInternal } from './http';
 import { errorFields, logError, logInfo, logWarn, requestIdFrom, routePath, shortId } from './logging';
+import { cleanupMatchResources } from './match-cleanup';
 import { normalizeUuid, uuidFromBlob, uuidToBlob } from './uuid';
 
 const playerSchema = z.object({
@@ -67,6 +67,7 @@ export class Match extends DurableObject {
       else if (url.pathname === '/internal/seed' && request.method === 'POST') response = await this.handleSeed(request);
       else if (url.pathname === '/ready' && request.method === 'POST') response = await this.handleReady(request);
       else if (url.pathname === '/claim' && request.method === 'POST') response = await this.handleClaim(request);
+      else if (url.pathname === '/forfeit' && request.method === 'POST') response = await this.handleForfeit(request);
       else if (url.pathname === '/exit' && request.method === 'POST') response = await this.handleExit(request);
       else if (url.pathname === '/state' && request.method === 'GET') response = await this.handleState();
       else response = errorResponse(404, 'Not found');
@@ -79,6 +80,7 @@ export class Match extends DurableObject {
         return errorResponse(error.status, error.message);
       }
       logError('match.request.error', { requestId, path, method: request.method, ...errorFields(error) });
+      await this.cleanupAfterFatalError(error, { requestId, path, method: request.method });
       return errorResponse(500, error instanceof Error ? error.message : 'Match error');
     }
   }
@@ -90,6 +92,9 @@ export class Match extends DurableObject {
   async webSocketError(ws: WebSocket): Promise<void> {
     const attachment = ws.deserializeAttachment() as MatchSocketAttachment | undefined;
     logWarn('match.socket.error', { kind: attachment?.kind, user: shortId(attachment?.uuid) });
+    if (attachment?.kind === 'velocity') {
+      await this.cleanupAfterFatalError(new Error('Velocity websocket error'), { path: 'websocket', method: 'WEBSOCKET' });
+    }
   }
 
   private async handlePlayerSocket(request: Request): Promise<Response> {
@@ -197,7 +202,7 @@ export class Match extends DurableObject {
         players: meta.players.map((player) => player.uuid),
         serverAddress: meta.serverAddress,
       };
-      this.broadcastToPlayers(meta, message);
+      this.broadcastToPlayersBestEffort(meta, message);
       await this.broadcastToVelocity(message);
       logInfo('match.ready', { requestId: requestIdFrom(request), matchId: shortId(meta.matchId), serverAddress: meta.serverAddress });
     }
@@ -215,6 +220,21 @@ export class Match extends DurableObject {
 
     logInfo('match.claim.handled', { requestId: requestIdFrom(request), claimant: shortId(uuid) });
 
+    return Response.json(result);
+  }
+
+  private async handleForfeit(request: Request): Promise<Response> {
+    const rawUser = request.headers.get('x-rir-user');
+    if (!rawUser) throw new HTTPException(401, { message: 'Unauthorized' });
+    const rawUserInput = z.object({ uuid: z.string() }).parse(JSON.parse(rawUser));
+    const uuid = normalizeUuid(rawUserInput.uuid);
+    let result: unknown;
+
+    await this.state.blockConcurrencyWhile(async () => {
+      result = await this.forfeit(uuid);
+    });
+
+    logInfo('match.forfeit.handled', { requestId: requestIdFrom(request), forfeiter: shortId(uuid) });
     return Response.json(result);
   }
 
@@ -237,37 +257,106 @@ export class Match extends DurableObject {
 
   private async claim(uuid: string): Promise<unknown> {
     const meta = await this.requireMeta();
-    const canonicalWinner = await this.findPersistedWinner(meta.matchId);
-    if (canonicalWinner) {
-      meta.winnerUuid = canonicalWinner;
-      await this.state.storage.put('meta', meta);
-      logInfo('match.claim.already_persisted', { matchId: shortId(meta.matchId), winner: shortId(canonicalWinner), claimant: shortId(uuid) });
-      return { winner: canonicalWinner, youWon: canonicalWinner === uuid, alreadyDecided: true };
-    }
-
-    if (meta.winnerUuid) {
-      logInfo('match.claim.already_decided', { matchId: shortId(meta.matchId), winner: shortId(meta.winnerUuid), claimant: shortId(uuid) });
-      return { winner: meta.winnerUuid, youWon: meta.winnerUuid === uuid, alreadyDecided: true };
-    }
-    if (meta.endedAt !== null) {
-      logInfo('match.claim.already_ended', { matchId: shortId(meta.matchId), claimant: shortId(uuid), endedAt: meta.endedAt });
-      return { winner: null, youWon: false, alreadyDecided: true, ended: true };
-    }
+    const alreadyDecided = await this.alreadyDecidedResult(meta, uuid, 'claim');
+    if (alreadyDecided) return alreadyDecided;
     if (!meta.players.some((player) => player.uuid === uuid)) {
       throw new HTTPException(403, { message: 'Claimant is not in this match' });
     }
 
+    const eloChanges = await this.persistWinner(meta, uuid);
+    const message = {
+      type: 'match_result',
+      matchId: meta.matchId,
+      winner: uuid,
+      eloChanges,
+    };
+    this.broadcastToPlayersBestEffort(meta, message);
+    await this.broadcastToVelocityBestEffort(message, 'match_result');
+    await this.cleanupMatch({
+      meta,
+      reason: 'match_claimed',
+      deleteD1: false,
+      clearStorage: false,
+      stopContainer: true,
+      closeCode: 1000,
+      closeReason: 'Match complete',
+    });
+
+    logInfo('match.claim.winner_set', { matchId: shortId(meta.matchId), winner: shortId(uuid), playerCount: meta.players.length });
+
+    return { winner: uuid, youWon: true, eloChanges };
+  }
+
+  private async forfeit(uuid: string): Promise<unknown> {
+    const meta = await this.requireMeta();
+    const alreadyDecided = await this.alreadyDecidedResult(meta, uuid, 'forfeit');
+    if (alreadyDecided) return alreadyDecided;
+
+    if (!meta.players.some((player) => player.uuid === uuid)) {
+      throw new HTTPException(403, { message: 'Forfeiting player is not in this match' });
+    }
+
+    const winner = meta.players.find((player) => player.uuid !== uuid);
+    if (!winner) throw new Error('Cannot forfeit a match without an opponent');
+
+    const eloChanges = await this.persistWinner(meta, winner.uuid);
+    const message = {
+      type: 'match_result',
+      matchId: meta.matchId,
+      winner: winner.uuid,
+      forfeited: uuid,
+      eloChanges,
+    };
+    this.broadcastToPlayersBestEffort(meta, message);
+    await this.broadcastToVelocityBestEffort(message, 'match_forfeit');
+    await this.cleanupMatch({
+      meta,
+      reason: 'forfeit',
+      deleteD1: false,
+      clearStorage: false,
+      stopContainer: true,
+      closeCode: 1000,
+      closeReason: 'Match forfeited',
+    });
+
+    logInfo('match.forfeit.winner_set', { matchId: shortId(meta.matchId), forfeiter: shortId(uuid), winner: shortId(winner.uuid) });
+
+    return { winner: winner.uuid, youWon: false, forfeited: true, eloChanges };
+  }
+
+  private async alreadyDecidedResult(meta: MatchMeta, viewerUuid: string, action: 'claim' | 'forfeit'): Promise<unknown | null> {
+    const canonicalWinner = await this.findPersistedWinner(meta.matchId);
+    if (canonicalWinner) {
+      meta.winnerUuid = canonicalWinner;
+      await this.state.storage.put('meta', meta);
+      logInfo(`match.${action}.already_persisted`, { matchId: shortId(meta.matchId), winner: shortId(canonicalWinner), player: shortId(viewerUuid) });
+      return { winner: canonicalWinner, youWon: canonicalWinner === viewerUuid, alreadyDecided: true };
+    }
+
+    if (meta.winnerUuid) {
+      logInfo(`match.${action}.already_decided`, { matchId: shortId(meta.matchId), winner: shortId(meta.winnerUuid), player: shortId(viewerUuid) });
+      return { winner: meta.winnerUuid, youWon: meta.winnerUuid === viewerUuid, alreadyDecided: true };
+    }
+    if (meta.endedAt !== null) {
+      logInfo(`match.${action}.already_ended`, { matchId: shortId(meta.matchId), player: shortId(viewerUuid), endedAt: meta.endedAt });
+      return { winner: null, youWon: false, alreadyDecided: true, ended: true };
+    }
+
+    return null;
+  }
+
+  private async persistWinner(meta: MatchMeta, winnerUuid: string): Promise<NonNullable<MatchMeta['eloChanges']>> {
     const endedAt = nowSeconds();
-    const outcomes = calculateOneVOneElo(meta.players, uuid);
+    const outcomes = calculateOneVOneElo(meta.players, winnerUuid);
     const statements: D1PreparedStatement[] = [
       this.bindings.DB
         .prepare('UPDATE matches SET winner_uuid = ?, ended_at = ? WHERE match_id = ? AND winner_uuid IS NULL')
-        .bind(uuidToBlob(uuid), endedAt, meta.matchId),
+        .bind(uuidToBlob(winnerUuid), endedAt, meta.matchId),
     ];
 
     for (const player of meta.players) {
       const outcome = outcomes[player.uuid];
-      const won = player.uuid === uuid ? 1 : 0;
+      const won = player.uuid === winnerUuid ? 1 : 0;
       const playerUuidBlob = uuidToBlob(player.uuid);
       statements.push(
         this.bindings.DB
@@ -294,7 +383,7 @@ export class Match extends DurableObject {
     }
 
     await this.bindings.DB.batch(statements);
-    meta.winnerUuid = uuid;
+    meta.winnerUuid = winnerUuid;
     meta.endedAt = endedAt;
     meta.eloChanges = Object.fromEntries(
       Object.entries(outcomes).map(([playerUuid, outcome]) => [
@@ -302,23 +391,14 @@ export class Match extends DurableObject {
         { before: outcome.before, after: outcome.after, delta: outcome.delta },
       ]),
     );
-    await this.state.storage.put('meta', meta);
-    await this.bindings.CACHE.delete(LEADERBOARD_CACHE_KEY);
-    await Promise.all(meta.players.map((player) => this.bindings.ROUTING.delete(routeKey(player.uuid))));
+    await this.state.storage.put('meta', meta).catch((error) => {
+      logError('match.result.storage_failed', { matchId: shortId(meta.matchId), winner: shortId(winnerUuid), ...errorFields(error) });
+    });
+    await this.bindings.CACHE.delete(LEADERBOARD_CACHE_KEY).catch((error) => {
+      logError('match.result.cache_delete_failed', { matchId: shortId(meta.matchId), ...errorFields(error) });
+    });
 
-    const message = {
-      type: 'match_result',
-      matchId: meta.matchId,
-      winner: uuid,
-      eloChanges: meta.eloChanges,
-    };
-    this.broadcastToPlayers(meta, message);
-    await this.broadcastToVelocity(message);
-    this.state.waitUntil(stopMatch(this.bindings, meta.matchId).catch(() => undefined));
-
-    logInfo('match.claim.winner_set', { matchId: shortId(meta.matchId), winner: shortId(uuid), playerCount: meta.players.length });
-
-    return { winner: uuid, youWon: true, eloChanges: meta.eloChanges };
+    return meta.eloChanges;
   }
 
   private async markContainerExited(input: z.infer<typeof exitSchema>): Promise<unknown> {
@@ -332,13 +412,6 @@ export class Match extends DurableObject {
 
     const endedAt = nowSeconds();
     meta.endedAt = endedAt;
-    await this.bindings.DB
-      .prepare('UPDATE matches SET ended_at = ? WHERE match_id = ? AND ended_at IS NULL')
-      .bind(endedAt, meta.matchId)
-      .run();
-    await this.state.storage.put('meta', meta);
-    await Promise.all(meta.players.map((player) => this.bindings.ROUTING.delete(routeKey(player.uuid))));
-
     const message = {
       type: 'match_aborted',
       matchId: meta.matchId,
@@ -347,8 +420,16 @@ export class Match extends DurableObject {
       serverName: input.serverName ?? meta.serverName,
       serverAddress: meta.serverAddress,
     };
-    this.broadcastToPlayers(meta, message);
-    await this.broadcastToVelocity(message);
+    await this.cleanupMatch({
+      meta,
+      reason: input.reason ?? 'container_exited',
+      deleteD1: true,
+      clearStorage: true,
+      stopContainer: false,
+      closeCode: 1000,
+      closeReason: 'Match closed',
+      message,
+    });
 
     logWarn('match.container_exited', {
       matchId: shortId(meta.matchId),
@@ -359,6 +440,96 @@ export class Match extends DurableObject {
     });
 
     return { ok: true, ended: true, ...publicMatchState(meta) };
+  }
+
+  private async cleanupAfterFatalError(error: unknown, context: { requestId?: string; path: string; method: string }): Promise<void> {
+    try {
+      await this.state.blockConcurrencyWhile(async () => {
+        const meta = await this.getMeta();
+        if (!meta) {
+          logError('match.cleanup.fatal_without_meta', { ...context, ...errorFields(error) });
+          return;
+        }
+
+        let persistedWinner = meta.winnerUuid;
+        if (!persistedWinner) {
+          persistedWinner = await this.findPersistedWinner(meta.matchId).catch((lookupError) => {
+            logError('match.cleanup.winner_lookup_failed', { matchId: shortId(meta.matchId), ...errorFields(lookupError) });
+            return null;
+          });
+        }
+
+        if (persistedWinner) {
+          meta.winnerUuid = persistedWinner;
+          await this.cleanupMatch({
+            meta,
+            reason: 'fatal_after_result',
+            deleteD1: false,
+            clearStorage: false,
+            stopContainer: true,
+            closeCode: 1000,
+            closeReason: 'Match complete',
+          });
+          return;
+        }
+
+        meta.endedAt = meta.endedAt ?? nowSeconds();
+        await this.cleanupMatch({
+          meta,
+          reason: 'fatal_error',
+          deleteD1: true,
+          clearStorage: true,
+          stopContainer: true,
+          closeCode: 1011,
+          closeReason: 'Match server error',
+          message: {
+            type: 'match_aborted',
+            matchId: meta.matchId,
+            reason: 'fatal_error',
+          },
+        });
+      });
+    } catch (cleanupError) {
+      logError('match.cleanup.fatal_failed', { ...context, ...errorFields(cleanupError) });
+    }
+  }
+
+  private async cleanupMatch(input: {
+    meta: MatchMeta;
+    reason: string;
+    deleteD1: boolean;
+    clearStorage: boolean;
+    stopContainer: boolean;
+    closeCode: number;
+    closeReason: string;
+    message?: unknown;
+  }): Promise<void> {
+    if (input.message) {
+      this.broadcastToPlayersBestEffort(input.meta, input.message);
+      await this.broadcastToVelocityBestEffort(input.message, input.reason);
+    }
+
+    this.closeSockets(input.closeCode, input.closeReason);
+    await cleanupMatchResources(this.bindings, {
+      matchId: input.meta.matchId,
+      players: input.meta.players.map((player) => player.uuid),
+      reason: input.reason,
+      deleteD1: input.deleteD1,
+      stopContainer: input.stopContainer,
+    });
+
+    if (input.clearStorage) {
+      await this.state.storage.delete('meta').catch((error) => {
+        logError('match.cleanup.storage_delete_failed', { matchId: shortId(input.meta.matchId), reason: input.reason, ...errorFields(error) });
+      });
+    }
+
+    logInfo('match.cleanup.done', {
+      matchId: shortId(input.meta.matchId),
+      reason: input.reason,
+      deleteD1: input.deleteD1,
+      clearStorage: input.clearStorage,
+    });
   }
 
   private async getMeta(): Promise<MatchMeta | null> {
@@ -379,9 +550,20 @@ export class Match extends DurableObject {
     return row ? uuidFromBlob(row.winner_uuid) : null;
   }
 
-  private broadcastToPlayers(meta: MatchMeta, message: unknown): void {
-    for (const player of meta.players) this.broadcastToTag(playerTag(player.uuid), message);
-    this.broadcastToTag('spectator', message);
+  private broadcastToPlayersBestEffort(meta: MatchMeta, message: unknown): void {
+    for (const player of meta.players) this.broadcastToTagBestEffort(playerTag(player.uuid), message);
+    this.broadcastToTagBestEffort('spectator', message);
+  }
+
+  private broadcastToTagBestEffort(tag: string, message: unknown): void {
+    const payload = JSON.stringify(message);
+    for (const socket of this.state.getWebSockets(tag)) {
+      try {
+        socket.send(payload);
+      } catch (error) {
+        logWarn('match.socket.send_failed', { tag, ...errorFields(error) });
+      }
+    }
   }
 
   private broadcastToTag(tag: string, message: unknown): void {
@@ -390,11 +572,28 @@ export class Match extends DurableObject {
   }
 
   private async broadcastToVelocity(message: unknown): Promise<void> {
-    await this.bindings.MATCH.getByName(VELOCITY_HUB_NAME).fetch('https://match.internal/internal/broadcast', {
+    const response = await this.bindings.MATCH.getByName(VELOCITY_HUB_NAME).fetch('https://match.internal/internal/broadcast', {
       method: 'POST',
       headers: internalHeaders({ 'content-type': 'application/json' }),
       body: JSON.stringify(message),
     });
+    if (!response.ok) throw new Error(`Velocity broadcast failed: ${response.status} ${await response.text()}`);
+  }
+
+  private async broadcastToVelocityBestEffort(message: unknown, reason: string): Promise<void> {
+    await this.broadcastToVelocity(message).catch((error) => {
+      logError('match.velocity.broadcast_failed', { reason, ...errorFields(error) });
+    });
+  }
+
+  private closeSockets(code: number, reason: string): void {
+    for (const socket of this.state.getWebSockets()) {
+      try {
+        socket.close(code, reason);
+      } catch (error) {
+        logWarn('match.socket.close_failed', { ...errorFields(error) });
+      }
+    }
   }
 }
 

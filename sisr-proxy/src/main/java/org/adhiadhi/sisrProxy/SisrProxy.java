@@ -32,7 +32,7 @@ import net.kyori.adventure.text.Component;
 import org.slf4j.Logger;
 
 public class SisrProxy {
-  private static final Component NO_MATCH_MESSAGE = Component.text("match not found or match not ready spawning");
+  private static final Component NO_MATCH_MESSAGE = Component.text("match not found or match container not ready spawning");
   private static final Duration ROUTE_TIMEOUT = Duration.ofMillis(1200);
   private static final Gson GSON = new Gson();
 

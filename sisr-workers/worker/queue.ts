@@ -1,12 +1,13 @@
 import { DurableObject } from 'cloudflare:workers';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
-import { allocateMatch, stopMatch } from './allocator';
+import { allocateMatch } from './allocator';
 import type { MatchPlayer, QueueEntry, RirEnv } from './env';
-import { pendingKey, PENDING_TTL_SECONDS, QUEUE_WIDEN_AFTER_MS, routeKey } from './env';
+import { pendingKey, PENDING_TTL_SECONDS, QUEUE_WIDEN_AFTER_MS } from './env';
 import { internalHeaders, isWebSocketUpgrade, requireInternal } from './http';
 import { chooseTargetItem } from './items';
 import { errorFields, logError, logInfo, logWarn, requestIdFrom, routePath, shortId } from './logging';
+import { cleanupMatchResources } from './match-cleanup';
 import { normalizeUuid } from './uuid';
 
 const restoreSchema = z.object({
@@ -279,8 +280,13 @@ export class Queue extends DurableObject {
       logInfo('queue.match.formed', { matchId: shortId(matchId), playerCount: waiters.length, serverAddress: allocation.address });
     } catch (error) {
       logError('queue.match.form_failed', { matchId: shortId(matchId), playerCount: waiters.length, allocated, ...errorFields(error) });
-      if (allocated) await stopMatch(this.bindings, matchId).catch(() => undefined);
-      await Promise.all(players.map((uuid) => this.bindings.ROUTING.delete(routeKey(uuid))));
+      await cleanupMatchResources(this.bindings, {
+        matchId,
+        players,
+        reason: 'queue_form_failed',
+        deleteD1: true,
+        stopContainer: allocated,
+      });
       throw error;
     }
   }

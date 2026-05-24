@@ -31,6 +31,9 @@ export interface MatchState {
   winner: string | null;
   endedAt: number | null;
   eloChanges?: Record<string, EloChange>;
+  forfeited?: string;
+  aborted?: boolean;
+  abortReason?: string;
 }
 
 export interface MatchFoundMessage {
@@ -57,10 +60,24 @@ export interface MatchResultMessage {
   type: 'match_result';
   matchId: string;
   winner: string;
+  forfeited?: string;
   eloChanges?: Record<string, EloChange>;
 }
 
-export type MatchRealtimeMessage = MatchStateMessage | MatchReadyMessage | MatchResultMessage;
+export interface MatchAbortedMessage {
+  type: 'match_aborted';
+  matchId: string;
+  reason?: string;
+}
+
+export interface ForfeitMatchResponse {
+  winner: string | null;
+  youWon: boolean;
+  forfeited?: boolean;
+  eloChanges?: Record<string, EloChange>;
+}
+
+export type MatchRealtimeMessage = MatchStateMessage | MatchReadyMessage | MatchResultMessage | MatchAbortedMessage;
 
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { credentials: 'same-origin', ...init });
@@ -94,12 +111,26 @@ export function applyMatchRealtimeMessage(state: MatchState | null, message: Mat
     };
   }
 
+  if (message.type === 'match_aborted') {
+    return {
+      ...state,
+      endedAt: state.endedAt ?? nowSeconds(),
+      aborted: true,
+      abortReason: message.reason,
+    };
+  }
+
   return {
     ...state,
     winner: message.winner,
     endedAt: state.endedAt ?? nowSeconds(),
     eloChanges: message.eloChanges ?? state.eloChanges,
+    forfeited: message.forfeited ?? state.forfeited,
   };
+}
+
+export function forfeitMatch(matchId: string): Promise<ForfeitMatchResponse> {
+  return apiJson<ForfeitMatchResponse>(`/api/match/${matchId}/forfeit`, { method: 'POST' });
 }
 
 export function webSocketUrl(path: string): string {

@@ -87,8 +87,9 @@ export function useMatchSocket(matchId: string | null, onMessage: (message: Matc
     socket.onerror = () => {
       if (!closedByClient) setStatus('error');
     };
-    socket.onclose = () => {
-      if (!closedByClient) setStatus('error');
+    socket.onclose = (event) => {
+      if (closedByClient) return;
+      setStatus(event.code === 1000 ? 'idle' : 'error');
     };
 
     return () => {
@@ -127,7 +128,7 @@ function isMatchFoundMessage(message: unknown): message is MatchFoundMessage {
 }
 
 function isMatchRealtimeMessage(message: unknown): message is MatchRealtimeMessage {
-  return isRecord(message) && (message.type === 'match_state' || message.type === 'match_ready' || message.type === 'match_result');
+  return isRecord(message) && (message.type === 'match_state' || message.type === 'match_ready' || message.type === 'match_result' || message.type === 'match_aborted');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
