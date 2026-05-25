@@ -276,7 +276,10 @@ public final class MatchGame {
     }
 
     try {
-      HttpRequest.Builder request = HttpRequest.newBuilder(matchUri(apiBase, matchId, "ready"))
+      URI readyUri = matchUri(apiBase, matchId, "ready");
+      Sisr.LOGGER.info("Sending ready notification for match {} to {} with server {} and {} players", matchId, readyUri,
+          serverAddress, players.size());
+      HttpRequest.Builder request = HttpRequest.newBuilder(readyUri)
           .timeout(Duration.ofSeconds(4))
           .header("content-type", "application/json")
           .POST(HttpRequest.BodyPublishers.ofString(readyBody(matchId, targetItem, serverAddress, players)));
@@ -285,11 +288,18 @@ public final class MatchGame {
             .header("x-service-token", apiToken);
       }
 
-      HTTP.sendAsync(request.build(), HttpResponse.BodyHandlers.discarding())
+      HTTP.sendAsync(request.build(), HttpResponse.BodyHandlers.ofString())
           .whenComplete((response, error) -> {
-            if (error != null || response == null || response.statusCode() / 100 != 2) {
+            if (error != null) {
               Sisr.LOGGER.warn("Ready notification failed for match {}", matchId, error);
+              return;
             }
+            if (response == null || response.statusCode() / 100 != 2) {
+              Sisr.LOGGER.warn("Ready notification failed for match {} with HTTP {}: {}", matchId,
+                  response == null ? "unknown" : response.statusCode(), response == null ? "" : response.body());
+              return;
+            }
+            Sisr.LOGGER.info("Ready notification accepted for match {} with HTTP {}", matchId, response.statusCode());
           });
     } catch (IllegalArgumentException error) {
       Sisr.LOGGER.warn("Invalid API_BASE for ready notification in match {}: {}", matchId, apiBase, error);

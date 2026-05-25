@@ -379,9 +379,11 @@ function ConnectPanel({
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <HugeiconsIcon icon={ArrowRight01Icon} size={18} className="text-primary" />
-          Connect Now
+          {matchState.ready ? 'Connect Now' : 'Preparing Server'}
         </CardTitle>
-        <CardDescription>Use the Velocity address below. Lobby transfers happen after match readiness.</CardDescription>
+        <CardDescription>
+          {matchState.ready ? 'Use the Velocity address below.' : 'Wait for the server-ready signal before joining Velocity.'}
+        </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <div className="flex flex-wrap items-center gap-2">
@@ -393,12 +395,12 @@ function ConnectPanel({
           <p className="text-xs uppercase tracking-[0.25em] text-muted-foreground">Minecraft server</p>
           <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <code className="rounded-lg bg-muted px-3 py-2 text-sm text-foreground">{matchState.serverAddress || match.serverAddress}</code>
-            <Button variant="outline" onClick={onCopy}>{copied ? 'Copied' : 'Copy address'}</Button>
+            <Button variant="outline" onClick={onCopy} disabled={!matchState.ready}>{copied ? 'Copied' : matchState.ready ? 'Copy address' : 'Waiting for server'}</Button>
           </div>
         </div>
         <p className="text-sm text-muted-foreground">
-          Target item: <span className="font-medium text-foreground">{formatItemName(match.targetItem)}</span>. If you are already in the lobby,
-          Velocity will move you as soon as the Match DO broadcasts readiness.
+          Target item: <span className="font-medium text-foreground">{formatItemName(match.targetItem)}</span>. Do not connect until the
+          server status changes to ready; Velocity routes only after the Match DO broadcasts readiness.
         </p>
         {forfeitError ? <p className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{forfeitError}</p> : null}
       </CardContent>

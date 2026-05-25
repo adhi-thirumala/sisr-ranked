@@ -83,7 +83,7 @@ public class SisrProxy {
     String currentApiToken = apiToken;
     CompletableFuture<Void> routeSelection = fetchRouteAsync(uuid, currentApiBase, currentApiToken).thenAccept(route -> {
       if (route == null) {
-        logger.info("No match found for {} ({}), disconnecting", event.getPlayer().getUsername(), uuid);
+        logger.info("No ready match route found for {} ({}), disconnecting", event.getPlayer().getUsername(), uuid);
         event.getPlayer().disconnect(NO_MATCH_MESSAGE);
         return;
       }
@@ -163,6 +163,7 @@ public class SisrProxy {
         serverAddress = routeResponse.address();
       }
       if (Boolean.FALSE.equals(routeResponse.ready())) {
+        logger.info("Route for {} exists but match {} is not ready yet at {}", uuid, routeResponse.matchId(), serverAddress);
         return null;
       }
       if (routeResponse.matchId() == null || routeResponse.matchId().isBlank() || serverAddress == null || serverAddress.isBlank()) {
