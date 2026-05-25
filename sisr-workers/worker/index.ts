@@ -5,7 +5,7 @@ import { getLeaderboard, getProfile, getUser } from './db';
 import type { AuthenticatedUser, RirEnv, RouteEntry } from './env';
 import { routeKey, VELOCITY_HUB_NAME } from './env';
 import { isServiceAuthorized } from './http';
-import { errorFields, logError, logInfo, logWarn, requestIdFrom, routePath, shortId } from './logging';
+import { errorFields, logError, logInfo, logWarn, requestIdFrom, routePath, shortId, type LogFields } from './logging';
 import { bracketForElo, Queue } from './queue';
 import { Match } from './match';
 import { clearSessionCookie, readSession, type RirContext } from './session';
@@ -91,30 +91,44 @@ app.get('/api/auth/test', async (c) => {
 app.get('/api/queue/join', async (c) => {
   const user = await requireUser(c);
   const bracket = bracketForElo(user.elo);
+  const requestId = c.get('requestId');
   const headers = forwardedHeaders(c.req.raw);
-  headers.set('x-rir-request-id', c.get('requestId'));
+  headers.set('x-rir-request-id', requestId);
   headers.set('x-rir-user', JSON.stringify({ uuid: user.uuid, name: user.name, elo: user.elo }));
   headers.set('x-rir-bracket', bracket);
-  logInfo('queue.join.forward', { requestId: c.get('requestId'), user: shortId(user.uuid), bracket, elo: user.elo });
-  return c.env.QUEUE.getByName(bracket).fetch('https://queue.internal/join', { method: 'GET', headers });
+  logInfo('queue.join.forward', { requestId, user: shortId(user.uuid), bracket, elo: user.elo });
+  return fetchDurableObject(
+    { requestId, binding: 'QUEUE', name: bracket, path: '/join', method: 'GET', fields: { user: shortId(user.uuid), elo: user.elo } },
+    () => c.env.QUEUE.getByName(bracket).fetch('https://queue.internal/join', { method: 'GET', headers }),
+  );
 });
 
 app.get('/api/match/:matchId/ws', async (c) => {
   const user = await requireUser(c);
+  const matchId = c.req.param('matchId');
+  const requestId = c.get('requestId');
   const headers = forwardedHeaders(c.req.raw);
-  headers.set('x-rir-request-id', c.get('requestId'));
+  headers.set('x-rir-request-id', requestId);
   headers.set('x-rir-user', JSON.stringify({ uuid: user.uuid }));
-  logInfo('match.ws.forward', { requestId: c.get('requestId'), matchId: shortId(c.req.param('matchId')), user: shortId(user.uuid) });
-  return c.env.MATCH.getByName(c.req.param('matchId')).fetch('https://match.internal/ws', { method: 'GET', headers });
+  logInfo('match.ws.forward', { requestId, matchId: shortId(matchId), user: shortId(user.uuid) });
+  return fetchDurableObject(
+    { requestId, binding: 'MATCH', name: matchId, path: '/ws', method: 'GET', fields: { user: shortId(user.uuid) } },
+    () => c.env.MATCH.getByName(matchId).fetch('https://match.internal/ws', { method: 'GET', headers }),
+  );
 });
 
 app.post('/api/match/:matchId/forfeit', async (c) => {
   const user = await requireUser(c);
+  const matchId = c.req.param('matchId');
+  const requestId = c.get('requestId');
   const headers = forwardedHeaders(c.req.raw);
-  headers.set('x-rir-request-id', c.get('requestId'));
+  headers.set('x-rir-request-id', requestId);
   headers.set('x-rir-user', JSON.stringify({ uuid: user.uuid }));
-  logInfo('match.forfeit.forward', { requestId: c.get('requestId'), matchId: shortId(c.req.param('matchId')), user: shortId(user.uuid) });
-  return c.env.MATCH.getByName(c.req.param('matchId')).fetch('https://match.internal/forfeit', { method: 'POST', headers });
+  logInfo('match.forfeit.forward', { requestId, matchId: shortId(matchId), user: shortId(user.uuid) });
+  return fetchDurableObject(
+    { requestId, binding: 'MATCH', name: matchId, path: '/forfeit', method: 'POST', fields: { user: shortId(user.uuid) } },
+    () => c.env.MATCH.getByName(matchId).fetch('https://match.internal/forfeit', { method: 'POST', headers }),
+  );
 });
 
 app.get('/api/velocity/events', (c) => {
@@ -123,10 +137,10 @@ app.get('/api/velocity/events', (c) => {
   headers.set('x-rir-request-id', c.get('requestId'));
   headers.set('x-rir-service', '1');
   logInfo('velocity.events.forward', { requestId: c.get('requestId') });
-  return c.env.MATCH.getByName(VELOCITY_HUB_NAME).fetch('https://match.internal/velocity/events', {
-    method: 'GET',
-    headers,
-  });
+  return fetchDurableObject(
+    { requestId: c.get('requestId'), binding: 'MATCH', name: VELOCITY_HUB_NAME, path: '/velocity/events', method: 'GET' },
+    () => c.env.MATCH.getByName(VELOCITY_HUB_NAME).fetch('https://match.internal/velocity/events', { method: 'GET', headers }),
+  );
 });
 
 app.post('/api/match/:matchId/ready', async (c) => {
@@ -159,12 +173,19 @@ app.get('/api/match/state/:uuid', async (c) => {
   const route = await c.env.ROUTING.get(routeKey(c.req.param('uuid')));
   if (!route) return c.json({ error: 'No active match' }, 404);
   const { matchId } = JSON.parse(route) as RouteEntry;
-  return c.env.MATCH.getByName(matchId).fetch('https://match.internal/state');
+  return fetchDurableObject(
+    { requestId: c.get('requestId'), binding: 'MATCH', name: matchId, path: '/state', method: 'GET', fields: { user: shortId(c.req.param('uuid')) } },
+    () => c.env.MATCH.getByName(matchId).fetch('https://match.internal/state'),
+  );
 });
 
 app.get('/api/match/:matchId/state', async (c) => {
   if (!isServiceAuthorized(c.req.raw, c.env)) await requireUser(c);
-  return c.env.MATCH.getByName(c.req.param('matchId')).fetch('https://match.internal/state');
+  const matchId = c.req.param('matchId');
+  return fetchDurableObject(
+    { requestId: c.get('requestId'), binding: 'MATCH', name: matchId, path: '/state', method: 'GET' },
+    () => c.env.MATCH.getByName(matchId).fetch('https://match.internal/state'),
+  );
 });
 
 app.get('/api/leaderboard', async (c) => c.json({ leaderboard: await getLeaderboard(c.env) }));
@@ -215,11 +236,41 @@ function forwardedHeaders(request: Request): Headers {
 }
 
 function forwardMatchPost(env: RirEnv, requestId: string, matchId: string, path: '/ready' | '/claim' | '/exit', body: string): Promise<Response> {
-  return env.MATCH.getByName(matchId).fetch(`https://match.internal${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-rir-request-id': requestId },
-    body,
-  });
+  return fetchDurableObject(
+    { requestId, binding: 'MATCH', name: matchId, path, method: 'POST' },
+    () =>
+      env.MATCH.getByName(matchId).fetch(`https://match.internal${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-rir-request-id': requestId },
+        body,
+      }),
+  );
+}
+
+interface DurableObjectForwardContext {
+  requestId: string;
+  binding: 'MATCH' | 'QUEUE';
+  name: string;
+  path: string;
+  method: string;
+  fields?: LogFields;
+}
+
+async function fetchDurableObject(context: DurableObjectForwardContext, fetcher: () => Promise<Response>): Promise<Response> {
+  try {
+    return await fetcher();
+  } catch (error) {
+    logError('durable_object.forward.error', {
+      requestId: context.requestId,
+      binding: context.binding,
+      durableObjectName: context.binding === 'MATCH' ? shortId(context.name) : context.name,
+      durableObjectPath: context.path,
+      method: context.method,
+      ...(context.fields ?? {}),
+      ...errorFields(error),
+    });
+    throw error;
+  }
 }
 
 interface SkinResponse {

@@ -178,7 +178,13 @@ export class Queue extends DurableObject {
       try {
         await this.formMatch(selected);
       } catch (error) {
-        await this.restoreWaiters(selected);
+        logError('queue.match.local_failed', { queueName: selected[0]?.queueName, playerCount: selected.length, ...errorFields(error) });
+        try {
+          await this.restoreWaiters(selected);
+        } catch (restoreError) {
+          logError('queue.match.restore_failed', { queueName: selected[0]?.queueName, playerCount: selected.length, ...errorFields(restoreError) });
+          throw restoreError;
+        }
         throw error;
       }
     }
@@ -191,17 +197,24 @@ export class Queue extends DurableObject {
     const [oldest] = waiters;
     if (Date.now() - oldest.joinedAt < QUEUE_WIDEN_AFTER_MS) return;
 
-    for (const neighbor of neighborBrackets(await this.currentBracketName())) {
+    const queueName = await this.currentBracketName();
+    for (const neighbor of neighborBrackets(queueName)) {
       const borrowed = await this.borrowFromNeighbor(neighbor);
       if (!borrowed) continue;
 
       const selected = [oldest, borrowed];
-      logInfo('queue.match.widened_selected', { queueName: await this.currentBracketName(), neighbor, waitedMs: Date.now() - oldest.joinedAt });
+      logInfo('queue.match.widened_selected', { queueName, neighbor, waitedMs: Date.now() - oldest.joinedAt });
       await this.state.storage.delete(queueKey(oldest.uuid));
       try {
         await this.formMatch(selected);
       } catch (error) {
-        await this.restoreWaiters(selected);
+        logError('queue.match.widened_failed', { queueName, neighbor, playerCount: selected.length, waitedMs: Date.now() - oldest.joinedAt, ...errorFields(error) });
+        try {
+          await this.restoreWaiters(selected);
+        } catch (restoreError) {
+          logError('queue.match.restore_failed', { queueName, neighbor, playerCount: selected.length, ...errorFields(restoreError) });
+          throw restoreError;
+        }
         throw error;
       }
       return;
@@ -210,11 +223,18 @@ export class Queue extends DurableObject {
 
   private async borrowFromNeighbor(queueName: string): Promise<QueueEntry | null> {
     const stub = this.bindings.QUEUE.getByName(queueName);
-    const response = await stub.fetch('https://queue.internal/borrow', {
-      method: 'POST',
-      headers: internalHeaders({ 'content-type': 'application/json' }),
-      body: JSON.stringify({ requester: await this.currentBracketName() }),
-    });
+    const requester = await this.currentBracketName();
+    let response: Response;
+    try {
+      response = await stub.fetch('https://queue.internal/borrow', {
+        method: 'POST',
+        headers: internalHeaders({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ requester }),
+      });
+    } catch (error) {
+      logError('queue.borrow.error', { queueName, requester, ...errorFields(error) });
+      throw error;
+    }
     if (response.status === 204) return null;
     if (!response.ok) {
       logWarn('queue.borrow.failed', { queueName, status: response.status });
@@ -297,12 +317,21 @@ export class Queue extends DurableObject {
       return;
     }
 
-    const response = await this.bindings.QUEUE.getByName(waiter.queueName).fetch('https://queue.internal/notify-match', {
-      method: 'POST',
-      headers: internalHeaders({ 'content-type': 'application/json' }),
-      body: JSON.stringify({ uuid: waiter.uuid, message }),
-    });
-    if (!response.ok) throw new Error(`Remote queue notify failed: ${response.status}`);
+    let response: Response;
+    try {
+      response = await this.bindings.QUEUE.getByName(waiter.queueName).fetch('https://queue.internal/notify-match', {
+        method: 'POST',
+        headers: internalHeaders({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ uuid: waiter.uuid, message }),
+      });
+    } catch (error) {
+      logError('queue.waiter.remote_notify_error', { queueName: waiter.queueName, user: shortId(waiter.uuid), ...errorFields(error) });
+      throw error;
+    }
+    if (!response.ok) {
+      logError('queue.waiter.remote_notify_failed', { queueName: waiter.queueName, user: shortId(waiter.uuid), status: response.status });
+      throw new Error(`Remote queue notify failed: ${response.status}`);
+    }
   }
 
   private async notifyLocalWaiter(uuid: string, message: unknown): Promise<void> {
@@ -334,13 +363,17 @@ export class Queue extends DurableObject {
   private async restoreWaiters(waiters: QueueEntry[]): Promise<void> {
     const currentBracket = await this.currentBracketName();
     await Promise.all(
-      waiters.map((waiter) => {
+      waiters.map(async (waiter) => {
         if (waiter.queueName === currentBracket) return this.state.storage.put(queueKey(waiter.uuid), waiter);
-        return this.bindings.QUEUE.getByName(waiter.queueName).fetch('https://queue.internal/restore', {
+        const response = await this.bindings.QUEUE.getByName(waiter.queueName).fetch('https://queue.internal/restore', {
           method: 'POST',
           headers: internalHeaders({ 'content-type': 'application/json' }),
           body: JSON.stringify(waiter),
         });
+        if (!response.ok) {
+          logError('queue.waiter.restore_failed', { queueName: waiter.queueName, user: shortId(waiter.uuid), status: response.status });
+          throw new Error(`Remote queue restore failed: ${response.status}`);
+        }
       }),
     );
   }
