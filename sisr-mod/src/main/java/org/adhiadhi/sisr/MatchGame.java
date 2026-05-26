@@ -272,17 +272,22 @@ public final class MatchGame {
     String serverAddress = config.serverAddress();
     List<String> players = Arrays.stream(config.allowedPlayers()).map(UUID::toString).toList();
     if (apiBase.isBlank()) {
+      Sisr.LOGGER.info("Skipping ready notification for match {} because API_BASE is not set", matchId);
       return;
     }
 
     try {
       URI readyUri = matchUri(apiBase, matchId, "ready");
-      Sisr.LOGGER.info("Sending ready notification for match {} to {} with server {} and {} players", matchId, readyUri,
-          serverAddress, players.size());
+      String body = readyBody(matchId, targetItem, serverAddress, players);
+      long startedAt = System.currentTimeMillis();
+      Sisr.LOGGER.info(
+          "Posting ready notification for match {} via POST {} with server {}, target {}, {} players, tokenConfigured={}, bodyBytes={}",
+          matchId, readyUri, serverAddress, targetItem, players.size(), !apiToken.isBlank(),
+          body.getBytes(StandardCharsets.UTF_8).length);
       HttpRequest.Builder request = HttpRequest.newBuilder(readyUri)
           .timeout(Duration.ofSeconds(4))
           .header("content-type", "application/json")
-          .POST(HttpRequest.BodyPublishers.ofString(readyBody(matchId, targetItem, serverAddress, players)));
+          .POST(HttpRequest.BodyPublishers.ofString(body));
       if (!apiToken.isBlank()) {
         request.header("authorization", "Bearer " + apiToken)
             .header("x-service-token", apiToken);
@@ -290,17 +295,22 @@ public final class MatchGame {
 
       HTTP.sendAsync(request.build(), HttpResponse.BodyHandlers.ofString())
           .whenComplete((response, error) -> {
+            long durationMs = System.currentTimeMillis() - startedAt;
             if (error != null) {
-              Sisr.LOGGER.warn("Ready notification failed for match {}", matchId, error);
+              Sisr.LOGGER.warn("Ready notification POST failed for match {} to {} after {}ms", matchId, readyUri,
+                  durationMs, error);
               return;
             }
             if (response == null || response.statusCode() / 100 != 2) {
-              Sisr.LOGGER.warn("Ready notification failed for match {} with HTTP {}: {}", matchId,
-                  response == null ? "unknown" : response.statusCode(), response == null ? "" : response.body());
+              Sisr.LOGGER.warn("Ready notification POST failed for match {} to {} after {}ms with HTTP {}: {}", matchId,
+                  readyUri, durationMs, response == null ? "unknown" : response.statusCode(),
+                  response == null ? "" : response.body());
               return;
             }
-            Sisr.LOGGER.info("Ready notification accepted for match {} with HTTP {}", matchId, response.statusCode());
+            Sisr.LOGGER.info("Ready notification POST accepted for match {} to {} after {}ms with HTTP {}", matchId,
+                readyUri, durationMs, response.statusCode());
           });
+      Sisr.LOGGER.info("Ready notification POST dispatched asynchronously for match {} to {}", matchId, readyUri);
     } catch (IllegalArgumentException error) {
       Sisr.LOGGER.warn("Invalid API_BASE for ready notification in match {}: {}", matchId, apiBase, error);
     }

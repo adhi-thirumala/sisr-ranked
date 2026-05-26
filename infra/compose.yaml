@@ -24,7 +24,8 @@ services:
     volumes:
       - "${XDG_RUNTIME_DIR}/podman/podman.sock:/run/podman/podman.sock"
     networks:
-      - rir-net
+      rir-net:
+        ipv4_address: 10.89.0.10
 
   velocity:
     image: "${VELOCITY_IMAGE:-localhost/sisr-velocity:latest}"
@@ -47,3 +48,6 @@ services:
 networks:
   rir-net:
     name: rir-net
+    ipam:
+      config:
+        - subnet: 10.89.0.0/24
