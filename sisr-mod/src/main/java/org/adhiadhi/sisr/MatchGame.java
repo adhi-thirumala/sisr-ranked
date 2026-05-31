@@ -148,7 +148,15 @@ public final class MatchGame {
     }
     checkedEnvironment = true;
     MatchConfig envConfig = MatchConfig.fromEnvironment();
-    if (envConfig != null && !start(server, envConfig)) {
+    if (envConfig == null) {
+      Sisr.LOGGER.info("No TARGET_ITEM configured; SISR match will not auto-start from environment");
+      return;
+    }
+    Sisr.LOGGER.info(
+        "Loaded SISR match environment for match {}, target {}, {} allowed players, apiBaseConfigured={}, tokenConfigured={}, serverAddress={}",
+        envConfig.matchId(), envConfig.targetItem(), envConfig.allowedPlayers().length, !envConfig.apiBase().isBlank(),
+        !envConfig.apiToken().isBlank(), envConfig.serverAddress());
+    if (!start(server, envConfig)) {
       Sisr.LOGGER.error("Invalid TARGET_ITEM: {}", envConfig.targetItem());
       server.halt(false);
     }

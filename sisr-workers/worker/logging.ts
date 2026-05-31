@@ -39,16 +39,42 @@ export function routePath(request: Request): string {
 }
 
 function writeLog(level: 'info' | 'warn' | 'error', event: string, fields?: LogFields): void {
+  const cleaned = stripUndefined(fields) ?? {};
   const record = JSON.stringify({
     ts: new Date().toISOString(),
     level,
     event,
-    ...(stripUndefined(fields) ?? {}),
+    message: buildMessage(event, cleaned),
+    ...cleaned,
   });
 
   if (level === 'error') console.error(record);
   else if (level === 'warn') console.warn(record);
   else console.log(record);
+}
+
+function buildMessage(event: string, fields: LogFields): string {
+  const explicit = fields.message;
+  if (typeof explicit === 'string' && explicit.length > 0) return explicit;
+
+  const parts = Object.entries(fields)
+    .filter(([key]) => key !== 'message')
+    .map(([key, value]) => `${key}=${formatValue(value)}`);
+
+  return parts.length > 0 ? `${event} ${parts.join(' ')}` : event;
+}
+
+function formatValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function stripUndefined(fields: LogFields | undefined): LogFields | undefined {
