@@ -43,7 +43,13 @@
     "OAUTH_REDIRECT_URI": "https://sisr-ranked.adhi-thirumala.workers.dev/api/auth/microsoft/callback",
   },
   "observability": {
-    "enabled": true,
-  },
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": false
+    }
+  }
   "upload_source_maps": true,
 }
