@@ -17,7 +17,12 @@ export interface AllocateMatchInput {
 
 export async function allocateMatch(env: RirEnv, input: AllocateMatchInput): Promise<AllocationResult> {
   const startedAt = Date.now();
-  logInfo('allocator.match.start.request', { matchId: shortId(input.matchId), playerCount: input.players.length, targetItem: input.targetItem });
+  logInfo('allocator.match.start.request', {
+    message: `game ${input.matchId} spawned: ${input.targetItem}`,
+    matchId: shortId(input.matchId),
+    playerCount: input.players.length,
+    targetItem: input.targetItem,
+  });
   const response = await env.AGENT.fetch('http://agent:8080/match/start', {
     method: 'POST',
     headers: agentHeaders(env),
